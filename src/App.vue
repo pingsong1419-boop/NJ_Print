@@ -1,4 +1,4 @@
-<script setup lang="ts">
+﻿<script setup lang="ts">
 import { ref, reactive, onMounted, nextTick } from 'vue'
 import type { AppConfig, OrderInfo, RouteStep, TestResult, User } from './types/mes'
 import {
@@ -140,6 +140,7 @@ const materialVerificationLoading = ref(false)
 const materialVerificationSuccess = ref(false)
 const verifiedMaterials = ref<Array<{ productCode: string; productCount: number }>>([])
 const processStartTime = ref(new Date().toLocaleString())
+const scannerAlertMessage = ref('')
 
 const inProgressOrderCodes = ref<string[]>([])
 const currentOrderStatus = ref<string>('')
@@ -155,6 +156,19 @@ let orderSelectionResolver: ((code: string | null) => void) | null = null
 function addLog(level: 'info' | 'success' | 'warn' | 'error', msg: string) {
   logs.value.unshift({ time: new Date().toLocaleTimeString(), level, msg })
   if (logs.value.length > 200) logs.value.pop()
+}
+
+function clearScannerAlert() {
+  scannerAlertMessage.value = ''
+}
+
+function handleMaterialScannerLog(level: 'info' | 'success' | 'warn' | 'error', msg: string) {
+  addLog(level, msg)
+  if (level === 'warn' || level === 'error') {
+    scannerAlertMessage.value = msg
+    return
+  }
+  clearScannerAlert()
 }
 
 function setCurrentOrderState(order: OrderInfo | null) {
@@ -176,6 +190,7 @@ function resetAll() {
   resultMessage.value = ''
   materialVerificationSuccess.value = false
   materialVerificationLoading.value = false
+  scannerAlertMessage.value = ''
   verifiedMaterials.value = []
   processStartTime.value = new Date().toLocaleString()
 }
@@ -416,6 +431,7 @@ async function fetchRouteList(routeCode: string, workSeqNo: string) {
 }
 
 function handleSingleMaterialScan(material: { productCode: string; productCount: number }) {
+  clearScannerAlert()
   const rec: ApiRecord = {
     title: '单物料扫码匹配',
     url: 'LOCAL_MATCH',
@@ -430,6 +446,7 @@ function handleSingleMaterialScan(material: { productCode: string; productCount:
 async function handleMaterialComplete(materials: { productCode: string; productCount: number }[]) {
   if (!orderInfo.value || materialVerificationLoading.value || materialVerificationSuccess.value) return
 
+  clearScannerAlert()
   materialVerificationLoading.value = true
   materialVerificationSuccess.value = false
   testResult.value = 'IDLE'
@@ -784,10 +801,12 @@ async function executeReset() {
           <div v-show="activeTab === 'material'" class="tab-pane flex-column">
             <div v-if="materialVerificationLoading" class="status-banner loading-mini">正在提交全物料校验，请稍候...</div>
             <div v-if="materialVerificationSuccess" class="status-banner success-mini">物料校验通过，正在执行报工...</div>
+            <div v-if="scannerAlertMessage" class="status-banner fail-mini">{{ scannerAlertMessage }}</div>
             <div v-if="testResult === 'NG'" class="status-banner fail-mini">校验或报工失败: {{ resultMessage }}</div>
             <MaterialScanner
               :steps="routeSteps"
-              @log="addLog"
+              :remote-check-passed="materialVerificationSuccess"
+              @log="handleMaterialScannerLog"
               @single-complete="handleSingleMaterialScan"
               @complete="handleMaterialComplete"
             />
