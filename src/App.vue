@@ -1,11 +1,12 @@
 ﻿<script setup lang="ts">
-import { ref, reactive, onMounted, nextTick } from 'vue'
-import type { AppConfig, OrderInfo, RouteStep, TestResult, User } from './types/mes'
+import { ref, reactive, onMounted, nextTick, computed } from 'vue'
+import type { AppConfig, ModulePackCodeCreateRequest, OrderInfo, RouteStep, TestResult, User } from './types/mes'
 import {
   getOrderByProcess,
   getRouteList,
   completeCheckInput,
   pushPackMessageToMes,
+  createModulePackCode,
   readOrderStatusSelectionFromFile,
   saveOrderStatusSelectionToFile
 } from './services/mesApi'
@@ -18,9 +19,17 @@ import LoginModal from './components/LoginModal.vue'
 
 const CONFIG_KEY = 'mes_app_config_v3'
 const DEFAULT_CONFIG: AppConfig = {
-  orderApiUrl: '/mes-api/api/OrderInfo/GetOtherOrderInfoByProcess',
+  orderApiUrl: '/mes-api/api/OrderInfo/GetSourceOrderInfoByProcess',
   routeApiUrl: '/mes-api/api/OrderInfo/GetTechRouteListByCode',
+  singleMaterialApiUrl: '/mes-api/api/ProduceMessage/SingleCheckInput',
+  fullMaterialApiUrl: '/mes-api/api/ProduceMessage/CompleteCheckInput',
+  codeCreateApiUrl: 'http://172.25.57.144:8034/api/CodeCreate/ModulePackCodeCreate',
   technicsProcessCode: 'CTP_P1240',
+  technicsProcessName: '',
+  userName: 'admin',
+  userAccount: 'admin',
+  deviceCode: '',
+  deviceName: '',
   logSavePath: 'C:\\NJ_Material_Logs',
   adminUsername: 'admin',
   adminPassword: '123'
@@ -29,7 +38,13 @@ const DEFAULT_CONFIG: AppConfig = {
 function loadConfig(): AppConfig {
   try {
     const raw = localStorage.getItem(CONFIG_KEY)
-    if (raw) return { ...DEFAULT_CONFIG, ...JSON.parse(raw) }
+    if (raw) {
+      const merged = { ...DEFAULT_CONFIG, ...JSON.parse(raw) } as AppConfig
+      if (merged.orderApiUrl === '/mes-api/api/OrderInfo/GetOtherOrderInfoByProcess') {
+        merged.orderApiUrl = '/mes-api/api/OrderInfo/GetSourceOrderInfoByProcess'
+      }
+      return merged
+    }
   } catch {
     // ignore parse errors and use defaults
   }
@@ -78,6 +93,125 @@ function getOrderStatus(order: Partial<OrderInfo> | null | undefined): string {
 function getOrderWorkSeqNo(order: Partial<OrderInfo> | null | undefined): string {
   void order
   return (config.technicsProcessCode || '').trim()
+}
+
+function getOrderField(order: Partial<OrderInfo> | null | undefined, keys: string[]): string {
+  if (!order) return ''
+  const data = order as any
+  for (const key of keys) {
+    const val = data[key]
+    if (val !== undefined && val !== null && String(val).trim() !== '') return String(val).trim()
+  }
+  return ''
+}
+
+function formatDateYYYYMMDD(date: Date): string {
+  const year = date.getFullYear()
+  const month = String(date.getMonth() + 1).padStart(2, '0')
+  const day = String(date.getDate()).padStart(2, '0')
+  return `${year}-${month}-${day}`
+}
+
+async function requestCreatePackCodes(
+  cplx: 'S' | 'P',
+  cplxname: string,
+  xmh: string,
+  ggdm: string,
+  tzdm: string
+): Promise<string[]> {
+  const payload: ModulePackCodeCreateRequest = {
+    csname: '合肥',
+    bmtime: formatDateYYYYMMDD(new Date()),
+    xmh,
+    cplx,
+    cplxname,
+    ggdm,
+    dysl: '1',
+    dcbsl: '1',
+    useR_NO: 'device001',
+    useR_NAME: '设备001',
+    dclx: '磷酸铁锂电池',
+    scgc: '南京国轩公司',
+    sccx: '三期PACK三线',
+    tzdm,
+    mzjx: '0'
+  }
+
+  const t0 = Date.now()
+  const rec = reactive<ApiRecord>({
+    title: `获取条码(${cplx})`,
+    url: config.codeCreateApiUrl,
+    status: 'pending',
+    time: new Date().toLocaleTimeString(),
+    reqBody: payload
+  })
+  apiRecords.value.unshift(rec)
+
+  try {
+    const res = await createModulePackCode(config, payload)
+    rec.duration = Date.now() - t0
+    rec.resBody = res
+
+    const ok = String(res?.code ?? '') === '200' || res?.success === true
+    const codes = Array.isArray(res?.data) ? res.data.map((v) => String(v).trim()).filter(Boolean) : []
+    if (!ok || codes.length === 0) {
+      const msg = res?.message || res?.msg || '条码请求失败'
+      rec.status = 'error'
+      throw new Error(codes.length === 0 ? `${msg}（返回data为空）` : msg)
+    }
+
+    rec.status = 'success'
+    addLog('success', `[条码生成] ${cplxname}获取成功: ${codes.join(', ')}`)
+    return codes
+  } catch (err: any) {
+    rec.status = 'error'
+    if (!rec.resBody) rec.resBody = err?.message || String(err)
+    throw err
+  }
+}
+
+async function buildProduceInListByCodeCreate(): Promise<Array<{ productCode: string; productCount: number }> | null> {
+  createdCodes.value = { s: [], p: [], updatedAt: '' }
+  const xmh = getOrderField(orderInfo.value, ['xmh', 'projectCode', 'project_code', 'projectNo', 'project_No', 'projectNO'])
+  const ggdm = getOrderField(orderInfo.value, ['ggdm', 'specsCode', 'specCode', 'productSpecCode', 'product_SpecCode', 'packSpecCode'])
+  const tzdm = getOrderField(orderInfo.value, ['productProperty', 'product_Property', 'productproperty', 'tzdm']) || '8'
+
+  if (!xmh || !ggdm) {
+    const missing = [!xmh ? 'xmh(项目号)' : '', !ggdm ? 'ggdm(规格代码)' : ''].filter(Boolean).join('、')
+    testResult.value = 'NG'
+    resultMessage.value = `条码获取前置字段缺失: ${missing}`
+    addLog('error', `[条码生成] 工单字段缺失，无法获取条码: ${missing}`)
+    setGlobalStatus(`条码获取失败: ${missing}`, 'error')
+    return null
+  }
+
+  resultMessage.value = '物料校验通过，正在获取S/P条码...'
+  addLog('info', `[条码生成] 开始获取条码，xmh=${xmh}，ggdm=${ggdm}，tzdm=${tzdm}`)
+  setGlobalStatus('正在获取条码...', 'info')
+
+  try {
+    const sCodes = await requestCreatePackCodes('S', '电池系统', xmh, ggdm, tzdm)
+    const pCodes = await requestCreatePackCodes('P', '电池包', xmh, ggdm, tzdm)
+    createdCodes.value = { s: sCodes, p: pCodes, updatedAt: new Date().toLocaleString() }
+    addLog('info', `[条码生成] 汇总: S(${sCodes.join(', ')}) | P(${pCodes.join(', ')})`)
+    setGlobalStatus('条码获取成功', 'success')
+
+    const allCodes = [...sCodes, ...pCodes]
+    if (!allCodes.length) {
+      testResult.value = 'NG'
+      resultMessage.value = '条码接口未返回可用条码'
+      addLog('error', '[条码生成] 两次接口均未返回data条码')
+      setGlobalStatus('条码获取失败', 'error')
+      return null
+    }
+    return allCodes.map((code) => ({ productCode: code, productCount: 1 }))
+  } catch (err: any) {
+    testResult.value = 'NG'
+    resultMessage.value = `条码获取失败: ${err?.message || String(err)}`
+    addLog('error', `[条码生成] 失败: ${err?.message || String(err)}`)
+    setGlobalStatus(`条码获取失败: ${err?.message || String(err)}`, 'error')
+    return null
+  }
 }
 
 function normalizeOrderList(res: any): OrderInfo[] {
@@ -134,13 +268,32 @@ const testResult = ref<TestResult>('IDLE')
 const resultMessage = ref('')
 const logs = ref<{ time: string; level: 'info' | 'success' | 'warn' | 'error'; msg: string }[]>([])
 const apiRecords = ref<ApiRecord[]>([])
-const activeTab = ref<'route' | 'api' | 'log' | 'material'>('route')
+const activeTab = ref<'route' | 'material' | 'code' | 'api' | 'log'>('route')
 
 const materialVerificationLoading = ref(false)
 const materialVerificationSuccess = ref(false)
 const verifiedMaterials = ref<Array<{ productCode: string; productCount: number }>>([])
+const createdCodes = ref<{ s: string[]; p: string[]; updatedAt: string }>({ s: [], p: [], updatedAt: '' })
 const processStartTime = ref(new Date().toLocaleString())
 const scannerAlertMessage = ref('')
+const materialTaskCount = computed(() => {
+  let total = 0
+  routeSteps.value.forEach((seq: any) => {
+    const wsList = (seq?.workStepList as any[]) || []
+    wsList.forEach((ws: any) => {
+      const matList = (ws?.workStepMaterialList as any[]) || []
+      matList.forEach((mat: any) => {
+        const reqNum = Number(mat?.material_number) || 0
+        const materialNo = String(mat?.material_No ?? '').trim()
+        if (materialNo && reqNum > 0) total++
+      })
+    })
+  })
+  return total
+})
+const createdCodeCount = computed(() => createdCodes.value.s.length + createdCodes.value.p.length)
+const globalStatusText = ref('待执行')
+const globalStatusLevel = ref<'idle' | 'info' | 'success' | 'error'>('idle')
 
 const inProgressOrderCodes = ref<string[]>([])
 const currentOrderStatus = ref<string>('')
@@ -156,6 +309,11 @@ let orderSelectionResolver: ((code: string | null) => void) | null = null
 function addLog(level: 'info' | 'success' | 'warn' | 'error', msg: string) {
   logs.value.unshift({ time: new Date().toLocaleTimeString(), level, msg })
   if (logs.value.length > 200) logs.value.pop()
+}
+
+function setGlobalStatus(text: string, level: 'idle' | 'info' | 'success' | 'error' = 'info') {
+  globalStatusText.value = text
+  globalStatusLevel.value = level
 }
 
 function clearScannerAlert() {
@@ -192,7 +350,9 @@ function resetAll() {
   materialVerificationLoading.value = false
   scannerAlertMessage.value = ''
   verifiedMaterials.value = []
+  createdCodes.value = { s: [], p: [], updatedAt: '' }
   processStartTime.value = new Date().toLocaleString()
+  setGlobalStatus('待执行', 'idle')
 }
 
 function openOrderSelectionModal(orders: OrderInfo[], reason: string): Promise<string | null> {
@@ -368,12 +528,14 @@ async function handleScan() {
     if (!ok) {
       testResult.value = 'NG'
       resultMessage.value = '工单状态校验未通过，无法继续。'
+      setGlobalStatus('工单状态校验失败', 'error')
       return
     }
 
     if (!orderInfo.value) {
       testResult.value = 'NG'
       resultMessage.value = '未能确定当前工单，请重新确认。'
+      setGlobalStatus('工单确认失败', 'error')
       return
     }
 
@@ -383,6 +545,7 @@ async function handleScan() {
       testResult.value = 'NG'
       resultMessage.value = '配置中工序代码为空，无法下发工步。'
       addLog('error', '[工步] 配置中的工序代码为空，流程停止')
+      setGlobalStatus('工步列表获取失败: 工序代码为空', 'error')
       return
     }
     addLog('success', `[工单] 当前确认工单: ${getOrderCode(orderInfo.value)}`)
@@ -396,9 +559,11 @@ async function fetchRouteList(routeCode: string, workSeqNo: string) {
   if (!routeCode) {
     routeError.value = '工单缺少 routeNo，无法查询工步'
     addLog('error', `[工步] ${routeError.value}`)
+    setGlobalStatus(`工步列表获取失败: ${routeError.value}`, 'error')
     return
   }
 
+  setGlobalStatus('正在获取工步列表...', 'info')
   routeLoading.value = true
   const t0 = Date.now()
   const rec = reactive<ApiRecord>({
@@ -419,12 +584,14 @@ async function fetchRouteList(routeCode: string, workSeqNo: string) {
     routeSteps.value = Array.isArray(steps) ? steps : []
     rec.status = 'success'
     addLog('success', `[工步] 成功加载 ${routeSteps.value.length} 条工序`)
+    setGlobalStatus('工步列表获取成功', 'success')
     activeTab.value = 'material'
   } catch (err: any) {
     rec.status = 'error'
     rec.resBody = err?.message || String(err)
     routeError.value = err?.message || '工步查询失败'
     addLog('error', `[工步] 查询失败: ${routeError.value}`)
+    setGlobalStatus(`工步列表获取失败: ${routeError.value}`, 'error')
   } finally {
     routeLoading.value = false
   }
@@ -434,7 +601,7 @@ function handleSingleMaterialScan(material: { productCode: string; productCount:
   clearScannerAlert()
   const rec: ApiRecord = {
     title: '单物料扫码匹配',
-    url: 'LOCAL_MATCH',
+    url: config.singleMaterialApiUrl,
     status: 'success',
     time: new Date().toLocaleTimeString(),
     reqBody: material,
@@ -447,6 +614,7 @@ async function handleMaterialComplete(materials: { productCode: string; productC
   if (!orderInfo.value || materialVerificationLoading.value || materialVerificationSuccess.value) return
 
   clearScannerAlert()
+  setGlobalStatus('正在进行全物料校验...', 'info')
   materialVerificationLoading.value = true
   materialVerificationSuccess.value = false
   testResult.value = 'IDLE'
@@ -465,7 +633,7 @@ async function handleMaterialComplete(materials: { productCode: string; productC
   const t0 = Date.now()
   const rec = reactive<ApiRecord>({
     title: '全物料校验',
-    url: '/mes-api/api/ProduceMessage/CompleteCheckInput',
+    url: config.fullMaterialApiUrl,
     status: 'pending',
     time: new Date().toLocaleTimeString(),
     reqBody: reqData
@@ -484,6 +652,7 @@ async function handleMaterialComplete(materials: { productCode: string; productC
       testResult.value = 'NG'
       resultMessage.value = `物料校验未通过: ${msg}`
       addLog('error', `[物料校验] 失败: ${msg}`)
+      setGlobalStatus(`物料校验失败: ${msg}`, 'error')
       return
     }
 
@@ -491,8 +660,9 @@ async function handleMaterialComplete(materials: { productCode: string; productC
     materialVerificationSuccess.value = true
     verifiedMaterials.value = materials
     testResult.value = 'OK'
-    resultMessage.value = '物料校验通过，正在备份日志并报工...'
-    addLog('success', '[物料校验] 全部通过，开始执行报工')
+    resultMessage.value = '物料校验通过，正在获取条码并报工...'
+    addLog('success', '[物料校验] 全部通过，开始获取条码并执行报工')
+    setGlobalStatus('物料校验通过', 'success')
 
     await finalizeProcess()
   } catch (err: any) {
@@ -501,19 +671,23 @@ async function handleMaterialComplete(materials: { productCode: string; productC
     testResult.value = 'NG'
     resultMessage.value = `物料校验请求异常: ${err?.message || String(err)}`
     addLog('error', `[物料校验] 请求异常: ${err?.message || String(err)}`)
+    setGlobalStatus(`物料校验失败: ${err?.message || String(err)}`, 'error')
   } finally {
     materialVerificationLoading.value = false
   }
 }
 
 async function finalizeProcess() {
+  const produceInList = await buildProduceInListByCodeCreate()
+  if (!produceInList) return
   await saveAllLogsToLocal()
-  await submitAllDataToMes()
+  await submitAllDataToMes(produceInList)
 }
 
-async function submitAllDataToMes() {
+async function submitAllDataToMes(produceInList: Array<{ productCode: string; productCount: number }>) {
   if (!orderInfo.value) return
 
+  setGlobalStatus('正在报工...', 'info')
   const t0 = Date.now()
   const nowDate = new Date().toLocaleDateString()
   const endTimeStr = new Date().toLocaleString()
@@ -522,20 +696,20 @@ async function submitAllDataToMes() {
     produceOrderCode: (orderInfo.value as any).orderCode || (orderInfo.value as any).order_Code || (orderInfo.value as any).code || '',
     routeNo: (orderInfo.value as any).route_No || (orderInfo.value as any).routeNo || '',
     technicsProcessCode: config.technicsProcessCode,
-    technicsProcessName: '',
+    technicsProcessName: config.technicsProcessName || '',
     technicsStepCode: 'STEP1',
     technicsStepName: '物料绑定',
     productCode: productCode.value,
-    productCount: verifiedMaterials.value.length,
+    productCount: produceInList.length,
     productQuality: 0,
     produceDate: nowDate,
     startTime: processStartTime.value,
     endTime: endTimeStr,
-    userName: currentUser.value?.username || 'admin',
-    userAccount: currentUser.value?.username || 'admin',
-    deviceCode: '',
+    userName: config.userName || currentUser.value?.username || 'admin',
+    userAccount: config.userAccount || currentUser.value?.username || 'admin',
+    deviceCode: config.deviceCode || '',
     Remarks: '',
-    ProduceInEntityList: verifiedMaterials.value.map((m) => ({
+    ProduceInEntityList: produceInList.map((m) => ({
       productCode: m.productCode,
       ProductCount: m.productCount
     })),
@@ -543,7 +717,7 @@ async function submitAllDataToMes() {
     ngEntityList: [],
     cellParamEntityList: [],
     otherParamEntityList: [],
-    deviceName: ''
+    deviceName: config.deviceName || ''
   }
 
   const finalPayload = [payload]
@@ -568,6 +742,7 @@ async function submitAllDataToMes() {
       testResult.value = 'NG'
       resultMessage.value = `报工失败: ${failMsg}`
       addLog('error', `[报工] 失败: ${failMsg}`)
+      setGlobalStatus(`报工失败: ${failMsg}`, 'error')
       return
     }
 
@@ -575,12 +750,14 @@ async function submitAllDataToMes() {
     testResult.value = 'OK'
     resultMessage.value = '物料工站流程完成，报工已成功。'
     addLog('success', '[报工] 已成功推送 MES')
+    setGlobalStatus('报工完成', 'success')
   } catch (err: any) {
     rec.status = 'error'
     rec.resBody = err?.message || String(err)
     testResult.value = 'NG'
     resultMessage.value = `报工网络异常: ${err?.message || String(err)}`
     addLog('error', `[报工] 网络异常: ${err?.message || String(err)}`)
+    setGlobalStatus(`报工失败: ${err?.message || String(err)}`, 'error')
   }
 }
 
@@ -679,8 +856,10 @@ async function executeReset() {
   materialVerificationSuccess.value = false
   materialVerificationLoading.value = false
   verifiedMaterials.value = []
+  createdCodes.value = { s: [], p: [], updatedAt: '' }
   testResult.value = 'IDLE'
   resultMessage.value = ''
+  setGlobalStatus('待执行', 'idle')
   activeTab.value = 'route'
 
   addLog('info', '----------------------------------------')
@@ -713,6 +892,11 @@ async function executeReset() {
         <button class="icon-btn" title="系统配置" @click="showConfig = true">配置</button>
       </div>
     </header>
+
+    <div class="global-status-bar" :class="globalStatusLevel">
+      <span class="gs-label">全局状态</span>
+      <span class="gs-text">{{ globalStatusText }}</span>
+    </div>
 
     <main class="app-main">
       <section class="left-panel">
@@ -781,7 +965,14 @@ async function executeReset() {
             工步列表
             <span v-if="routeSteps.length" class="tab-count">{{ routeSteps.length }}</span>
           </button>
-          <button class="tab-btn" :class="{ active: activeTab === 'material' }" @click="activeTab = 'material'">物料校验</button>
+          <button class="tab-btn" :class="{ active: activeTab === 'material' }" @click="activeTab = 'material'">
+            物料校验
+            <span v-if="materialTaskCount" class="tab-count">{{ materialTaskCount }}</span>
+          </button>
+          <button class="tab-btn" :class="{ active: activeTab === 'code' }" @click="activeTab = 'code'">
+            条码获取
+            <span v-if="createdCodeCount" class="tab-count">{{ createdCodeCount }}</span>
+          </button>
           <button class="tab-btn" :class="{ active: activeTab === 'api' }" @click="activeTab = 'api'">
             接口交互
             <span v-if="apiRecords.length" class="tab-count">{{ apiRecords.length }}</span>
@@ -799,8 +990,6 @@ async function executeReset() {
           </div>
 
           <div v-show="activeTab === 'material'" class="tab-pane flex-column">
-            <div v-if="materialVerificationLoading" class="status-banner loading-mini">正在提交全物料校验，请稍候...</div>
-            <div v-if="materialVerificationSuccess" class="status-banner success-mini">物料校验通过，正在执行报工...</div>
             <div v-if="scannerAlertMessage" class="status-banner fail-mini">{{ scannerAlertMessage }}</div>
             <div v-if="testResult === 'NG'" class="status-banner fail-mini">校验或报工失败: {{ resultMessage }}</div>
             <MaterialScanner
@@ -810,6 +999,21 @@ async function executeReset() {
               @single-complete="handleSingleMaterialScan"
               @complete="handleMaterialComplete"
             />
+          </div>
+
+          <div v-show="activeTab === 'code'" class="tab-pane code-pane">
+            <div v-if="!createdCodeCount" class="code-empty">暂无条码。请先完成全物料校验并获取条码。</div>
+            <div v-else class="code-grid">
+              <div class="code-item">
+                <div class="code-label">S码（电池系统）</div>
+                <div class="code-value mono">{{ createdCodes.s.join(', ') }}</div>
+              </div>
+              <div class="code-item">
+                <div class="code-label">P码（电池包）</div>
+                <div class="code-value mono">{{ createdCodes.p.join(', ') }}</div>
+              </div>
+              <div class="code-time">获取时间：{{ createdCodes.updatedAt || '--' }}</div>
+            </div>
           </div>
 
           <div v-show="activeTab === 'api'" class="tab-pane">
@@ -888,6 +1092,49 @@ async function executeReset() {
   background: linear-gradient(135deg, #0d1b2a 0%, #112240 100%);
   border-bottom: 1px solid rgba(100, 181, 246, 0.2);
   gap: 16px;
+}
+
+.global-status-bar {
+  height: 38px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 0 16px;
+  border-bottom: 1px solid rgba(100, 181, 246, 0.14);
+  font-size: 13px;
+}
+
+.global-status-bar .gs-label {
+  color: #90caf9;
+  font-weight: 700;
+}
+
+.global-status-bar .gs-text {
+  color: #cfd8dc;
+}
+
+.global-status-bar.idle {
+  background: rgba(120, 144, 156, 0.08);
+}
+
+.global-status-bar.info {
+  background: rgba(33, 150, 243, 0.12);
+}
+
+.global-status-bar.success {
+  background: rgba(0, 230, 118, 0.12);
+}
+
+.global-status-bar.success .gs-text {
+  color: #a5d6a7;
+}
+
+.global-status-bar.error {
+  background: rgba(244, 67, 54, 0.14);
+}
+
+.global-status-bar.error .gs-text {
+  color: #ef9a9a;
 }
 
 .header-left {
@@ -1206,6 +1453,52 @@ async function executeReset() {
 .fail-mini {
   background: rgba(244, 67, 54, 0.12);
   color: #ef9a9a;
+}
+
+.code-pane {
+  padding: 12px;
+}
+
+.code-empty {
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #546e7a;
+  border: 1px dashed rgba(100, 181, 246, 0.2);
+  border-radius: 8px;
+  background: #0d1117;
+  font-size: 12px;
+}
+
+.code-grid {
+  display: grid;
+  gap: 10px;
+}
+
+.code-item {
+  border: 1px solid rgba(100, 181, 246, 0.15);
+  border-radius: 8px;
+  background: #0d1117;
+  padding: 10px 12px;
+}
+
+.code-label {
+  font-size: 12px;
+  color: #90caf9;
+  margin-bottom: 6px;
+}
+
+.code-value {
+  color: #80cbc4;
+  font-size: 13px;
+  word-break: break-all;
+}
+
+.code-time {
+  color: #78909c;
+  font-size: 12px;
+  padding: 0 2px;
 }
 
 .log-pane {

@@ -45,7 +45,7 @@ function handleCancel() {
 
         <div class="modal-body">
           <div class="field-group">
-            <label>获取工单 API</label>
+            <label>首工序获取工单 API</label>
             <input v-model="form.orderApiUrl" type="text" class="input-field" />
           </div>
 
@@ -55,8 +55,50 @@ function handleCancel() {
           </div>
 
           <div class="field-group">
+            <label>单物料校验 API</label>
+            <input v-model="form.singleMaterialApiUrl" type="text" class="input-field" />
+          </div>
+
+          <div class="field-group">
+            <label>全物料校验 API</label>
+            <input v-model="form.fullMaterialApiUrl" type="text" class="input-field" />
+          </div>
+
+          <div class="field-group">
+            <label>获取条码 API</label>
+            <input v-model="form.codeCreateApiUrl" type="text" class="input-field" />
+          </div>
+
+          <div class="field-group">
             <label>工序代码 (technicsProcessCode)</label>
             <input v-model="form.technicsProcessCode" type="text" class="input-field" />
+          </div>
+
+          <div class="field-group">
+            <label>工序名称 (technicsProcessName)</label>
+            <input v-model="form.technicsProcessName" type="text" class="input-field" />
+          </div>
+
+          <div class="field-groups-row">
+            <div class="field-group">
+              <label>用户名 (userName)</label>
+              <input v-model="form.userName" type="text" class="input-field" />
+            </div>
+            <div class="field-group">
+              <label>用户账号 (userAccount)</label>
+              <input v-model="form.userAccount" type="text" class="input-field" />
+            </div>
+          </div>
+
+          <div class="field-groups-row">
+            <div class="field-group">
+              <label>设备编码 (deviceCode)</label>
+              <input v-model="form.deviceCode" type="text" class="input-field" />
+            </div>
+            <div class="field-group">
+              <label>设备名称 (deviceName)</label>
+              <input v-model="form.deviceName" type="text" class="input-field" />
+            </div>
           </div>
 
           <div class="field-group">

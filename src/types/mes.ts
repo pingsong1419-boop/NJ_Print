@@ -1,7 +1,15 @@
-﻿export interface AppConfig {
+export interface AppConfig {
   orderApiUrl: string
   routeApiUrl: string
+  singleMaterialApiUrl: string
+  fullMaterialApiUrl: string
+  codeCreateApiUrl: string
   technicsProcessCode: string
+  technicsProcessName: string
+  userName: string
+  userAccount: string
+  deviceCode: string
+  deviceName: string
   logSavePath?: string
   adminUsername?: string
   adminPassword?: string
@@ -114,6 +122,32 @@ export interface CompleteCheckInputRequest {
   productMixCode: string | null
   productLine: string
   materialList: MaterialItem[]
+}
+
+export interface ModulePackCodeCreateRequest {
+  csname: string
+  bmtime: string
+  xmh: string
+  cplx: 'S' | 'P'
+  cplxname: string
+  ggdm: string
+  dysl: string
+  dcbsl: string
+  useR_NO: string
+  useR_NAME: string
+  dclx: string
+  scgc: string
+  sccx: string
+  tzdm: string
+  mzjx: string
+}
+
+export interface ModulePackCodeCreateResponse {
+  code: number | string
+  message?: string
+  msg?: string
+  data?: string[]
+  success?: boolean
 }
 
 export type UserRole = 'admin' | 'operator'

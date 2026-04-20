@@ -5,7 +5,9 @@
   GetRouteRequest,
   GetRouteResponse,
   CompleteCheckInputRequest,
-  OrderStatusSelectionState
+  OrderStatusSelectionState,
+  ModulePackCodeCreateRequest,
+  ModulePackCodeCreateResponse
 } from '../types/mes'
 
 async function postRequest<T>(url: string, body: object): Promise<T> {
@@ -41,12 +43,16 @@ export async function getRouteList(config: AppConfig, routeCode: string, workSeq
   return postRequest<GetRouteResponse>(config.routeApiUrl, params)
 }
 
-export async function completeCheckInput(_config: AppConfig, data: CompleteCheckInputRequest): Promise<any> {
-  return postRequest<any>('/mes-api/api/ProduceMessage/CompleteCheckInput', data)
+export async function completeCheckInput(config: AppConfig, data: CompleteCheckInputRequest): Promise<any> {
+  return postRequest<any>(config.fullMaterialApiUrl, data)
 }
 
 export async function pushPackMessageToMes(_config: AppConfig, data: any[]): Promise<any> {
   return postRequest<any>('/mes-push/api/ProduceMessage/PushPackMessageToMes', data)
+}
+
+export async function createModulePackCode(config: AppConfig, data: ModulePackCodeCreateRequest): Promise<ModulePackCodeCreateResponse> {
+  return postRequest<ModulePackCodeCreateResponse>(config.codeCreateApiUrl, data)
 }
 
 export async function readOrderStatusSelectionFromFile(): Promise<OrderStatusSelectionState | null> {
