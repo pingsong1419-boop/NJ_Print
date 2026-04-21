@@ -16,7 +16,8 @@ import {
   saveOrderStatusSelectionToFile,
   readAppConfigFromFile,
   saveAppConfigToFile,
-  checkPrintedHistory
+  checkPrintedHistory,
+  getPrintedHistoryList
 } from './services/mesApi'
 import ConfigModal from './components/ConfigModal.vue'
 import RouteTable from './components/RouteTable.vue'
@@ -386,6 +387,20 @@ const verifiedMaterials = ref<Array<{ productCode: string; productCount: number 
 const createdCodes = ref<{ s: string[]; p: string[]; updatedAt: string }>({ s: [], p: [], updatedAt: '' })
 const processStartTime = ref(new Date().toLocaleString())
 const scannerAlertMessage = ref('')
+const printedHistory = ref<any[]>([])
+const historyLoading = ref(false)
+
+async function fetchHistoryList() {
+  historyLoading.value = true
+  try {
+    const list = await getPrintedHistoryList()
+    printedHistory.value = (list || []).sort((a: any, b: any) => new Date(b.printedAt).getTime() - new Date(a.printedAt).getTime())
+  } catch (err: any) {
+    addLog('error', `[历史记录] 获取失败: ${err.message}`)
+  } finally {
+    historyLoading.value = false
+  }
+}
 const materialTaskCount = computed(() => {
   let total = 0
   routeSteps.value.forEach((seq: any) => {
@@ -1568,12 +1583,46 @@ async function executeReset() {
             操作日志
             <span v-if="logs.length" class="tab-count">{{ logs.length }}</span>
           </button>
+          <button class="tab-btn" :class="{ active: activeTab === 'history' }" @click="activeTab = 'history'; fetchHistoryList()">
+            打印历史
+            <span v-if="printedHistory.length" class="tab-count">{{ printedHistory.length }}</span>
+          </button>
         </div>
 
         <div class="tab-content">
           <div v-show="activeTab === 'route'" class="tab-pane">
             <div v-if="routeError" class="error-box">{{ routeError }}</div>
             <RouteTable :steps="routeSteps" :loading="routeLoading" />
+          </div>
+
+          <div v-show="activeTab === 'history'" class="tab-pane history-pane">
+            <div class="history-header">
+              <span class="history-info">已存库条码（不重复）：{{ printedHistory.length }} 条</span>
+              <button class="btn-refresh-mini" :disabled="historyLoading" @click="fetchHistoryList">
+                {{ historyLoading ? '同步中...' : '手动刷新' }}
+              </button>
+            </div>
+            <div v-if="!printedHistory.length" class="history-empty">
+              数据库为空。成功打印后的条码将显示在此处。
+            </div>
+            <div v-else class="history-list-container">
+              <table class="history-table">
+                <thead>
+                  <tr>
+                    <th>条码内容</th>
+                    <th>类型</th>
+                    <th>打印时间</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr v-for="(h, idx) in printedHistory" :key="idx">
+                    <td class="mono">{{ h.code }}</td>
+                    <td><span class="badge-type">{{ h.type }}</span></td>
+                    <td class="time-col">{{ h.printedAt ? new Date(h.printedAt).toLocaleString() : '--' }}</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
           </div>
 
           <div v-show="activeTab === 'material'" class="tab-pane flex-column">
