@@ -133,9 +133,7 @@ function fmt(val: unknown): string {
                         <th>物料编号</th>
                         <th>物料名称</th>
                         <th>数量</th>
-                        <th>条码长度</th>
                         <th>追溯类型</th>
-                        <th>校验长度</th>
                         <th>主键 ID</th>
                       </tr>
                     </thead>
@@ -145,9 +143,7 @@ function fmt(val: unknown): string {
                         <td class="mono val-cell">{{ mat.material_No ?? '—' }}</td>
                         <td class="param-name">{{ mat.material_Name ?? '—' }}</td>
                         <td class="center">{{ mat.material_number ?? '—' }}</td>
-                        <td class="center">{{ fmt(mat.noLength) }}</td>
                         <td class="center">{{ fmt(mat.retrospect_Type) }}</td>
-                        <td class="center">{{ fmt(mat.isCheckLength) }}</td>
                         <td class="muted mono small">{{ mat.material_id ?? '—' }}</td>
                       </tr>
                     </tbody>

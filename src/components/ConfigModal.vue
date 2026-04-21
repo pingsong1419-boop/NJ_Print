@@ -121,17 +121,35 @@ function handleCancel() {
           <section class="config-section">
             <div class="section-title">打印机参数设置</div>
             <div class="field-group">
-              <label>打印接口 URL</label>
-              <input v-model="form.printApiUrl" type="text" class="input-field" />
+              <label>BarTender EXE 路径</label>
+              <input v-model="form.barTenderExePath" type="text" class="input-field" />
+            </div>
+            <div class="field-group">
+              <label>模板路径 (.btw)</label>
+              <input v-model="form.barTenderTemplatePath" type="text" class="input-field" />
+            </div>
+            <div class="field-group">
+              <label>数据库路径 (CSV/文本)</label>
+              <input v-model="form.barTenderDatabasePath" type="text" class="input-field" />
+            </div>
+          </section>
+
+          <section class="config-section">
+            <div class="section-title">得力捷扫码枪参数</div>
+            <div class="field-groups-row">
+              <div class="field-group">
+                <label>扫码枪 IP</label>
+                <input v-model="form.scannerIp" type="text" class="input-field" />
+              </div>
+              <div class="field-group">
+                <label>扫码枪端口</label>
+                <input v-model.number="form.scannerPort" type="number" class="input-field" />
+              </div>
             </div>
             <div class="field-groups-row">
               <div class="field-group">
-                <label>Zebra 打印机 IP</label>
-                <input v-model="form.printerIp" type="text" class="input-field" />
-              </div>
-              <div class="field-group">
-                <label>Zebra 端口</label>
-                <input v-model.number="form.printerPort" type="number" class="input-field" />
+                <label>条码匹配规则 (Regex)</label>
+                <input v-model="form.barcodeMatchRegex" type="text" class="input-field" />
               </div>
             </div>
           </section>

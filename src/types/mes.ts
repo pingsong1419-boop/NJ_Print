@@ -5,9 +5,12 @@ export interface AppConfig {
   fullMaterialApiUrl: string
   codeCreateApiUrl: string
   mesPushApiUrl: string
-  printApiUrl: string
-  printerIp: string
-  printerPort: number
+  barTenderExePath: string
+  barTenderTemplatePath: string
+  barTenderDatabasePath: string
+  scannerIp: string
+  scannerPort: number
+  barcodeMatchRegex: string
   technicsProcessCode: string
   technicsProcessName: string
   userName: string
@@ -128,6 +131,14 @@ export interface CompleteCheckInputRequest {
   materialList: MaterialItem[]
 }
 
+export interface SingleCheckInputRequest {
+  produceOrderCode: string
+  routeNo: string
+  technicsProcessCode: string
+  materialCode: string
+  tenantID: string
+}
+
 export interface ModulePackCodeCreateRequest {
   csname: string
   bmtime: string
@@ -160,17 +171,45 @@ export interface PrintLabelItem {
   typeName: string
 }
 
-export interface PrintLabelsRequest {
-  printerIp: string
-  printerPort: number
+export interface BarTenderPrintRequest {
+  barTenderExePath: string
+  templatePath: string
+  databasePath: string
   labels: PrintLabelItem[]
-  copies?: number
 }
 
-export interface PrintLabelsResponse {
+export interface BarTenderPrintResponse {
   success?: boolean
   message?: string
-  printedCount?: number
+  command?: string
+  exitCode?: number | null
+  dataFilePath?: string
+}
+
+export interface BarcodeScannerStartRequest {
+  scannerIp: string
+  scannerPort: number
+  barcodeRegex: string
+}
+
+export interface BarcodeScannerStatus {
+  running: boolean
+  connected: boolean
+  scannerIp?: string
+  scannerPort?: number
+  barcodeRegex?: string
+  lastError?: string
+  ioLogs?: string[]
+}
+
+export interface BarcodeScanEvent {
+  id: number
+  code: string
+  time: string
+}
+
+export interface BarcodeScannerPullResponse extends BarcodeScannerStatus {
+  events: BarcodeScanEvent[]
 }
 
 export type UserRole = 'admin' | 'operator'

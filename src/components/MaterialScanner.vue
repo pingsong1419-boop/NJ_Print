@@ -1,40 +1,41 @@
-<script setup lang="ts">
-import { ref, watch, computed, nextTick } from 'vue'
+﻿<script setup lang="ts">
+import { ref, watch, computed } from 'vue'
 import type { RouteStep, WorkStep } from '../types/mes'
 
 const props = defineProps<{
   steps: RouteStep[]
   remoteCheckPassed?: boolean
+  productCode?: string
 }>()
 
 const emit = defineEmits<{
   (e: 'complete', materials: { productCode: string; productCount: number }[]): void
-  (e: 'single-complete', material: { productCode: string; productCount: number }): void
   (e: 'log', level: 'info' | 'success' | 'warn' | 'error', msg: string): void
 }>()
 
-export interface MaterialTask {
+interface MaterialTask {
   uid: string
-  seqIdx: number
   material_No: string
   material_Name: string
   material_number: number
-  noLength: number
   retrospect_Type: unknown
-  scannedCount: number
   scannedBarcodes: string[]
-  status: 'pending' | 'completed'
 }
 
 const taskList = ref<MaterialTask[]>([])
-const scanInput = ref('')
-const inputRef = ref<HTMLInputElement | null>(null)
+const autoSubmittedCode = ref('')
+
+function normalizeCode(raw: string) {
+  return raw.trim().toUpperCase()
+}
+
+const startProductCode = computed(() => normalizeCode(props.productCode || ''))
 
 function buildTasks() {
   const tasks: MaterialTask[] = []
   let uidCounter = 0
 
-  props.steps.forEach((seq, si) => {
+  props.steps.forEach((seq) => {
     const wsList = (seq.workStepList as WorkStep[]) || []
     wsList.forEach((ws) => {
       const matList = (ws.workStepMaterialList as any[]) || []
@@ -45,138 +46,70 @@ function buildTasks() {
 
         tasks.push({
           uid: `mat-${uidCounter++}`,
-          seqIdx: si + 1,
           material_No: materialNo,
           material_Name: String(mat.material_Name ?? ''),
           material_number: reqNum,
-          noLength: Number(mat.noLength) || 0,
           retrospect_Type: mat.retrospect_Type,
-          scannedCount: 0,
-          scannedBarcodes: [],
-          status: 'pending'
+          scannedBarcodes: []
         })
       })
     })
   })
 
   taskList.value = tasks
+  autoSubmittedCode.value = ''
+}
+
+function autoSubmitStartBarcode() {
+  const code = startProductCode.value
+  if (!code || !taskList.value.length) return
+  if (code === autoSubmittedCode.value) return
+
+  autoSubmittedCode.value = code
+  taskList.value.forEach((t) => {
+    t.scannedBarcodes = [code]
+  })
+
+  emit('complete', [{ productCode: code, productCount: 1 }])
 }
 
 watch(
   () => props.steps,
   () => {
     buildTasks()
-    if (taskList.value.length > 0) {
-      nextTick(() => inputRef.value?.focus())
-    }
+    autoSubmitStartBarcode()
   },
   { immediate: true, deep: true }
 )
 
-const isAllCompleted = computed(() => {
-  if (taskList.value.length === 0) return false
-  return taskList.value.every((t) => t.status === 'completed')
-})
-
-const isFinalPassed = computed(() => isAllCompleted.value && props.remoteCheckPassed === true)
-
-function normalizeCode(raw: string) {
-  return raw.trim().toUpperCase()
-}
-
-function handleScan() {
-  const code = normalizeCode(scanInput.value)
-  if (!code) return
-
-  const isDuplicate = taskList.value.some((t) => t.scannedBarcodes.includes(code))
-  if (isDuplicate) {
-    emit('log', 'warn', `扫码重复，已清空当前条码: ${code}`)
-    scanInput.value = ''
-    return
+watch(
+  () => props.productCode,
+  () => {
+    autoSubmitStartBarcode()
   }
+)
 
-  const candidates = taskList.value
-    .filter((t) => {
-      if (t.status === 'completed') return false
-
-      const prefix = normalizeCode(t.material_No)
-      if (!prefix || !code.startsWith(prefix)) return false
-      if (t.noLength > 0 && code.length < t.noLength) return false
-
-      return true
-    })
-    .sort((a, b) => normalizeCode(b.material_No).length - normalizeCode(a.material_No).length)
-
-  const target = candidates[0]
-
-  if (!target) {
-    emit('log', 'error', `扫码无匹配物料或该物料已扫完: ${code}`)
-    scanInput.value = ''
-    return
-  }
-
-  target.scannedCount++
-  target.scannedBarcodes.push(code)
-
-  if (target.scannedCount >= target.material_number) {
-    target.status = 'completed'
-    emit('log', 'success', `物料扫描匹配成功: ${target.material_Name} (全部完成)`)
-  } else {
-    emit('log', 'success', `物料扫描匹配成功: ${target.material_Name} (${target.scannedCount}/${target.material_number})`)
-  }
-
-  emit('single-complete', { productCode: code, productCount: 1 })
-
-  if (isAllCompleted.value) {
-    emit('log', 'success', '所有物料校验已全部通过')
-
-    const payloadMats = taskList.value.flatMap((t) =>
-      t.scannedBarcodes.map((scannedCode) => ({
-        productCode: scannedCode,
-        productCount: 1
-      }))
-    )
-
-    emit('complete', payloadMats)
-  }
-
-  scanInput.value = ''
-}
+const isSubmitted = computed(() => !!autoSubmittedCode.value)
+const isFinalPassed = computed(() => isSubmitted.value && props.remoteCheckPassed === true)
 </script>
 
 <template>
   <div class="material-scanner-panel">
     <div class="scan-action-bar">
-      <div class="scan-input-wrapper">
-        <span class="icon">扫码</span>
-        <input
-          ref="inputRef"
-          type="text"
-          class="scan-input"
-          v-model="scanInput"
-          @keyup.enter="handleScan"
-          placeholder="请使用扫码枪扫描物料条码以验证组件..."
-          autocomplete="off"
-          :disabled="isAllCompleted || !taskList.length"
-        />
-        <button
-          class="submit-btn"
-          @click="handleScan"
-          :disabled="isAllCompleted || !taskList.length"
-        >验证</button>
+      <div class="auto-check-tip">
+        物料校验自动模式（无本地适配）：使用开始产品条码
+        <span class="barcode-chip mono">{{ startProductCode || '--' }}</span>
       </div>
 
       <div class="progress-status" v-if="taskList.length">
         状态:
         <span v-if="isFinalPassed" class="status-all-done">全部验证通过</span>
-        <span v-else-if="isAllCompleted" class="status-pending">本地扫码完成，等待全物料校验</span>
-        <span v-else class="status-pending">等待验证 ({{ taskList.filter(t => t.status === 'completed').length }}/{{ taskList.length }})</span>
+        <span v-else-if="isSubmitted" class="status-pending">已提交MES校验，等待返回</span>
+        <span v-else class="status-pending">等待开始产品条码</span>
       </div>
     </div>
 
-    <div v-if="!taskList.length" class="empty-state">
-      当前工步无物料绑定信息，无需扫描验证。
-    </div>
+    <div v-if="!taskList.length" class="empty-state">当前工步无物料绑定信息，无需校验。</div>
 
     <div v-else class="table-scroll">
       <table>
@@ -186,40 +119,19 @@ function handleScan() {
             <th>物料编号</th>
             <th>物料名称</th>
             <th style="width: 60px" class="center">需求数</th>
-            <th style="width: 60px" class="center">条码长度</th>
             <th style="width: 80px" class="center">追溯类型</th>
-            <th style="width: 80px" class="center">已扫数量</th>
-            <th style="width: 60px" class="center">状态</th>
-            <th>已匹配条码</th>
+            <th>提交条码</th>
           </tr>
         </thead>
         <tbody>
-          <tr
-            v-for="(task, idx) in taskList"
-            :key="task.uid"
-            class="data-row"
-            :class="{ 'done-row': task.status === 'completed' }"
-          >
+          <tr v-for="(task, idx) in taskList" :key="task.uid" class="data-row">
             <td>
-              <span class="seq-badge" :class="{ 'done-badge': task.status === 'completed' }">{{ idx + 1 }}</span>
+              <span class="seq-badge">{{ idx + 1 }}</span>
             </td>
             <td class="mono c-blue">{{ task.material_No }}</td>
             <td class="mat-name">{{ task.material_Name }}</td>
             <td class="center req-num">{{ task.material_number }}</td>
-            <td class="center">{{ task.noLength > 0 ? task.noLength : '-' }}</td>
             <td class="center">{{ task.retrospect_Type ?? '-' }}</td>
-
-            <td class="center">
-              <span class="scan-count" :class="{ 'full': task.scannedCount >= task.material_number, 'partial': task.scannedCount > 0 && task.scannedCount < task.material_number }">
-                {{ task.scannedCount }}
-              </span>
-            </td>
-
-            <td class="center">
-              <span v-if="task.status === 'completed'" class="status-tag success">通过</span>
-              <span v-else class="status-tag pending">待扫</span>
-            </td>
-
             <td class="barcodes-cell mono small">
               <div v-for="(code, i) in task.scannedBarcodes" :key="i" class="code-item">
                 {{ code }}
@@ -250,60 +162,25 @@ function handleScan() {
   flex-shrink: 0;
 }
 
-.scan-input-wrapper {
-  flex: 1;
-  max-width: 500px;
+.auto-check-tip {
   display: flex;
   align-items: center;
-  background: #0d1117;
-  border: 1px solid rgba(100, 181, 246, 0.3);
+  gap: 8px;
+  color: #90caf9;
+  font-size: 13px;
+}
+
+.barcode-chip {
+  display: inline-block;
+  background: rgba(66, 165, 245, 0.15);
+  border: 1px solid rgba(66, 165, 245, 0.28);
+  color: #80cbc4;
   border-radius: 6px;
-  padding: 4px 6px;
-}
-
-.scan-input-wrapper:focus-within {
-  border-color: #42a5f5;
-  box-shadow: 0 0 0 2px rgba(66, 165, 245, 0.2);
-}
-
-.scan-input-wrapper .icon {
-  margin: 0 8px;
-  opacity: 0.6;
-}
-
-.scan-input {
-  flex: 1;
-  background: transparent;
-  border: none;
-  color: #e3f2fd;
-  font-family: inherit;
-  font-size: 14px;
-  outline: none;
-}
-
-.scan-input:disabled {
-  opacity: 0.5;
-}
-
-.submit-btn {
-  background: #1976d2;
-  color: white;
-  border: none;
-  padding: 6px 14px;
-  border-radius: 4px;
-  cursor: pointer;
-  font-weight: 600;
-  transition: all 0.2s;
-}
-
-.submit-btn:hover:not(:disabled) {
-  background: #1565c0;
-}
-
-.submit-btn:disabled {
-  background: #37474f;
-  color: #78909c;
-  cursor: not-allowed;
+  padding: 3px 8px;
+  max-width: 340px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .progress-status {
@@ -374,10 +251,6 @@ th {
   background: rgba(66, 165, 245, 0.04);
 }
 
-.done-row {
-  background: rgba(0, 230, 118, 0.03);
-}
-
 td {
   padding: 8px 12px;
   color: #cfd8dc;
@@ -420,42 +293,6 @@ td {
   border-radius: 4px;
   font-size: 10px;
   color: #90caf9;
-}
-
-.done-badge {
-  background: #00e676;
-  color: #000;
-}
-
-.scan-count {
-  font-size: 13px;
-  font-weight: 700;
-  color: #78909c;
-}
-
-.scan-count.partial {
-  color: #ffab40;
-}
-
-.scan-count.full {
-  color: #00e676;
-}
-
-.status-tag {
-  padding: 2px 8px;
-  border-radius: 10px;
-  font-size: 10px;
-  font-weight: 600;
-}
-
-.status-tag.pending {
-  background: rgba(255, 171, 64, 0.15);
-  color: #ffab40;
-}
-
-.status-tag.success {
-  background: rgba(0, 230, 118, 0.15);
-  color: #00e676;
 }
 
 .code-item {

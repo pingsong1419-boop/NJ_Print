@@ -1,12 +1,16 @@
 ﻿<script setup lang="ts">
-import { ref, reactive, onMounted, nextTick, computed } from 'vue'
-import type { AppConfig, ModulePackCodeCreateRequest, OrderInfo, RouteStep, TestResult, User } from './types/mes'
+import { ref, reactive, onMounted, onUnmounted, nextTick, computed } from 'vue'
+import type { AppConfig, ModulePackCodeCreateRequest, OrderInfo, PrintLabelItem, RouteStep, TestResult, User } from './types/mes'
 import {
   getOrderByProcess,
   getRouteList,
+  singleCheckInput,
   completeCheckInput,
   pushPackMessageToMes,
   createModulePackCode,
+  printLabelsByBarTender,
+  pullBarcodeScanner,
+  startBarcodeScanner,
   readOrderStatusSelectionFromFile,
   saveOrderStatusSelectionToFile
 } from './services/mesApi'
@@ -25,9 +29,12 @@ const DEFAULT_CONFIG: AppConfig = {
   fullMaterialApiUrl: '/mes-api/api/ProduceMessage/CompleteCheckInput',
   codeCreateApiUrl: 'http://172.25.57.144:8034/api/CodeCreate/ModulePackCodeCreate',
   mesPushApiUrl: '/mes-push/api/ProduceMessage/PushPackMessageToMes',
-  printApiUrl: 'http://127.0.0.1:5246/printLabels',
-  printerIp: '192.168.0.246',
-  printerPort: 9100,
+  barTenderExePath: 'C:\\Program Files\\Seagull\\BarTender Suite\\bartend.exe',
+  barTenderTemplatePath: 'C:\\BarTender\\Templates\\pack_label.btw',
+  barTenderDatabasePath: 'C:\\BarTender\\Data\\pack_labels.csv',
+  scannerIp: '172.25.57.144',
+  scannerPort: 3000,
+  barcodeMatchRegex: '^[0-9A-Za-z]{30}$',
   technicsProcessCode: 'CTP_P1240',
   technicsProcessName: '',
   userName: 'admin',
@@ -99,6 +106,10 @@ function getOrderWorkSeqNo(order: Partial<OrderInfo> | null | undefined): string
   return (config.technicsProcessCode || '').trim()
 }
 
+function getOrderTenantId(order: Partial<OrderInfo> | null | undefined): string {
+  return getOrderField(order, ['tenantID', 'tenantId', 'tenant_Id', 'lineCode', 'line_Code']) || 'FD'
+}
+
 function getOrderField(order: Partial<OrderInfo> | null | undefined, keys: string[]): string {
   if (!order) return ''
   const data = order as any
@@ -114,6 +125,19 @@ function formatDateYYYYMMDD(date: Date): string {
   const month = String(date.getMonth() + 1).padStart(2, '0')
   const day = String(date.getDate()).padStart(2, '0')
   return `${year}-${month}-${day}`
+}
+
+function validateProductBarcode(code: string): { ok: boolean; message?: string } {
+  const rawPattern = (config.barcodeMatchRegex || '').trim()
+  if (!rawPattern) return { ok: true }
+
+  try {
+    const regex = new RegExp(rawPattern)
+    if (regex.test(code)) return { ok: true }
+    return { ok: false, message: `产品条码不匹配规则: ${code} (正则不匹配)` }
+  } catch (err: any) {
+    return { ok: false, message: `产品条码规则无效: ${err?.message || String(err)}` }
+  }
 }
 
 async function requestCreatePackCodes(
@@ -200,15 +224,24 @@ async function buildProduceInListByCodeCreate(): Promise<Array<{ productCode: st
     addLog('info', `[条码生成] 汇总: S(${sCodes.join(', ')}) | P(${pCodes.join(', ')})`)
     setGlobalStatus('条码获取成功', 'success')
 
-    const allCodes = [...sCodes, ...pCodes]
-    if (!allCodes.length) {
+    const mesProductCode = productCode.value.trim()
+    const mesCodes = [...sCodes]
+    if (mesProductCode) {
+      mesCodes.push(mesProductCode)
+      addLog('info', `[报工] ProduceInEntityList 已按要求使用产品条码替代P码: ${mesProductCode}`)
+    } else {
+      mesCodes.push(...pCodes)
+      addLog('warn', '[报工] 产品条码为空，已回退使用P码写入 ProduceInEntityList')
+    }
+
+    if (!mesCodes.length) {
       testResult.value = 'NG'
       resultMessage.value = '条码接口未返回可用条码'
       addLog('error', '[条码生成] 两次接口均未返回data条码')
       setGlobalStatus('条码获取失败', 'error')
       return null
     }
-    return allCodes.map((code) => ({ productCode: code, productCount: 1 }))
+    return mesCodes.map((code) => ({ productCode: code, productCount: 1 }))
   } catch (err: any) {
     testResult.value = 'NG'
     resultMessage.value = `条码获取失败: ${err?.message || String(err)}`
@@ -255,7 +288,10 @@ const config = reactive<AppConfig>(loadConfig())
 const showConfig = ref(false)
 const showLogin = ref(false)
 const currentUser = ref<User | null>(null)
-const onConfigSaved = () => localStorage.setItem(CONFIG_KEY, JSON.stringify(config))
+const onConfigSaved = async () => {
+  localStorage.setItem(CONFIG_KEY, JSON.stringify(config))
+  await restartBarcodeScanner()
+}
 
 const productCode = ref('')
 const scanInputRef = ref<HTMLInputElement | null>(null)
@@ -303,6 +339,17 @@ const inProgressOrderCodes = ref<string[]>([])
 const currentOrderStatus = ref<string>('')
 const currentSelectedOrderCode = ref('')
 const currentOrderWorkSeqNo = ref('')
+const scannerConnected = ref(false)
+const scannerRunning = ref(false)
+const scannerLastError = ref('')
+const scannerLastEventId = ref(0)
+const scannerQueue = ref<string[]>([])
+const scannerIoSeen = new Set<string>()
+let scannerPollTimer: ReturnType<typeof setInterval> | null = null
+let scannerConsuming = false
+let scannerPollInFlight = false
+let scannerBusyQueueNotified = false
+const SCANNER_POLL_INTERVAL_MS = 120
 
 const showOrderSelectModal = ref(false)
 const selectingOrders = ref<OrderInfo[]>([])
@@ -516,11 +563,43 @@ async function initializeOrderStatusCheck() {
 onMounted(async () => {
   focusScan()
   await initializeOrderStatusCheck()
+  await restartBarcodeScanner()
+  await pollBarcodeScanner().catch(() => {
+    // first poll errors are logged in function
+  })
+  scannerPollTimer = setInterval(() => {
+    if (scannerPollInFlight) return
+    scannerPollInFlight = true
+    pollBarcodeScanner().catch(() => {
+      // polling errors are logged in function
+    }).finally(() => {
+      scannerPollInFlight = false
+    })
+  }, SCANNER_POLL_INTERVAL_MS)
+})
+
+onUnmounted(async () => {
+  if (scannerPollTimer) {
+    clearInterval(scannerPollTimer)
+    scannerPollTimer = null
+  }
+  scannerPollInFlight = false
 })
 
 async function handleScan() {
   const code = productCode.value.trim()
   if (!code || !config.technicsProcessCode) return
+
+  const validation = validateProductBarcode(code)
+  if (!validation.ok) {
+    testResult.value = 'NG'
+    resultMessage.value = validation.message || '产品条码规则校验失败'
+    setGlobalStatus(resultMessage.value, 'error')
+    addLog('error', `[条码规则] ${resultMessage.value}`)
+    productCode.value = ''
+    focusScan()
+    return
+  }
 
   resetAll()
   orderLoading.value = true
@@ -601,37 +680,94 @@ async function fetchRouteList(routeCode: string, workSeqNo: string) {
   }
 }
 
-function handleSingleMaterialScan(material: { productCode: string; productCount: number }) {
-  clearScannerAlert()
-  const rec: ApiRecord = {
-    title: '单物料扫码匹配',
-    url: config.singleMaterialApiUrl,
-    status: 'success',
-    time: new Date().toLocaleTimeString(),
-    reqBody: material,
-    resBody: { code: 200, message: '匹配成功' }
-  }
-  apiRecords.value.unshift(rec)
-}
-
 async function handleMaterialComplete(materials: { productCode: string; productCount: number }[]) {
   if (!orderInfo.value || materialVerificationLoading.value || materialVerificationSuccess.value) return
 
   clearScannerAlert()
-  setGlobalStatus('正在进行全物料校验...', 'info')
+  setGlobalStatus('正在进行单物料校验...', 'info')
   materialVerificationLoading.value = true
   materialVerificationSuccess.value = false
   testResult.value = 'IDLE'
-  resultMessage.value = '正在提交物料校验...'
+  resultMessage.value = '正在提交单物料校验...'
 
-  const reqData = {
-    produceOrderCode: (orderInfo.value as any).orderCode || (orderInfo.value as any).order_Code || (orderInfo.value as any).code || '',
-    routeNo: (orderInfo.value as any).route_No || (orderInfo.value as any).routeNo || '',
+  const produceOrderCode = (orderInfo.value as any).orderCode || (orderInfo.value as any).order_Code || (orderInfo.value as any).code || ''
+  const routeNo = (orderInfo.value as any).route_No || (orderInfo.value as any).routeNo || ''
+  const tenantID = getOrderTenantId(orderInfo.value)
+  const materialCode = String(materials[0]?.productCode || '').trim() || productCode.value.trim()
+
+  if (!produceOrderCode || !routeNo) {
+    testResult.value = 'NG'
+    resultMessage.value = '单物料校验失败: 工单或工艺路线为空'
+    addLog('error', '[单物料校验] 失败: 工单或工艺路线为空')
+    setGlobalStatus('单物料校验失败: 工单或工艺路线为空', 'error')
+    materialVerificationLoading.value = false
+    return
+  }
+
+  if (!materialCode) {
+    testResult.value = 'NG'
+    resultMessage.value = '单物料校验失败: 物料条码为空'
+    addLog('error', '[单物料校验] 失败: 物料条码为空')
+    setGlobalStatus('单物料校验失败: 物料条码为空', 'error')
+    materialVerificationLoading.value = false
+    return
+  }
+
+  const fullReqData = {
+    produceOrderCode,
+    routeNo,
     technicsProcessCode: config.technicsProcessCode,
-    tenantID: 'FD',
+    tenantID,
     productMixCode: (orderInfo.value as any).productMixCode || (orderInfo.value as any).product_MixCode || null,
     productLine: '',
     materialList: materials
+  }
+  const singleReqData = {
+    produceOrderCode,
+    routeNo,
+    technicsProcessCode: config.technicsProcessCode,
+    materialCode,
+    tenantID
+  }
+
+  const singleT0 = Date.now()
+  const singleRec = reactive<ApiRecord>({
+    title: '单物料MES校验',
+    url: config.singleMaterialApiUrl,
+    status: 'pending',
+    time: new Date().toLocaleTimeString(),
+    reqBody: singleReqData
+  })
+  apiRecords.value.unshift(singleRec)
+
+  try {
+    const singleRes = await singleCheckInput(config, singleReqData)
+    singleRec.duration = Date.now() - singleT0
+    singleRec.resBody = singleRes
+
+    const singleOk = !!(singleRes && (singleRes.code === 200 || singleRes.code === '200' || singleRes.success === true || singleRes.msg === '操作成功'))
+    if (!singleOk) {
+      const msg = singleRes?.message || singleRes?.msg || '未知错误'
+      singleRec.status = 'error'
+      testResult.value = 'NG'
+      resultMessage.value = `单物料校验未通过: ${msg}`
+      addLog('error', `[单物料校验] 失败: ${msg}`)
+      setGlobalStatus(`单物料校验失败: ${msg}`, 'error')
+      return
+    }
+
+    singleRec.status = 'success'
+    addLog('success', '[单物料校验] 通过，继续全物料校验')
+    setGlobalStatus('单物料校验通过，正在进行全物料校验...', 'info')
+    resultMessage.value = '单物料校验通过，正在提交全物料校验...'
+  } catch (err: any) {
+    singleRec.status = 'error'
+    singleRec.resBody = err?.message || String(err)
+    testResult.value = 'NG'
+    resultMessage.value = `单物料校验请求异常: ${err?.message || String(err)}`
+    addLog('error', `[单物料校验] 请求异常: ${err?.message || String(err)}`)
+    setGlobalStatus(`单物料校验失败: ${err?.message || String(err)}`, 'error')
+    return
   }
 
   const t0 = Date.now()
@@ -640,12 +776,12 @@ async function handleMaterialComplete(materials: { productCode: string; productC
     url: config.fullMaterialApiUrl,
     status: 'pending',
     time: new Date().toLocaleTimeString(),
-    reqBody: reqData
+    reqBody: fullReqData
   })
   apiRecords.value.unshift(rec)
 
   try {
-    const res = await completeCheckInput(config, reqData)
+    const res = await completeCheckInput(config, fullReqData)
     rec.duration = Date.now() - t0
     rec.resBody = res
 
@@ -684,12 +820,135 @@ async function handleMaterialComplete(materials: { productCode: string; productC
 async function finalizeProcess() {
   const produceInList = await buildProduceInListByCodeCreate()
   if (!produceInList) return
-  await submitAllDataToMes(produceInList)
+  const mesOk = await submitAllDataToMes(produceInList)
+  if (!mesOk) return
   await saveAllLogsToLocal()
+  await printGeneratedCodesByBarTender()
 }
 
-async function submitAllDataToMes(produceInList: Array<{ productCode: string; productCount: number }>) {
-  if (!orderInfo.value) return
+async function restartBarcodeScanner() {
+  try {
+    const req = {
+      scannerIp: (config.scannerIp || '').trim(),
+      scannerPort: Number(config.scannerPort) || 0,
+      barcodeRegex: (config.barcodeMatchRegex || '').trim()
+    }
+    if (!req.scannerIp || req.scannerPort <= 0) {
+      addLog('warn', '[扫码枪] IP或端口未配置，后台监听未启动')
+      scannerRunning.value = false
+      scannerConnected.value = false
+      return
+    }
+    const res = await startBarcodeScanner(req)
+    scannerRunning.value = !!res.running
+    scannerConnected.value = !!res.connected
+    scannerLastError.value = res.lastError || ''
+    addLog('info', `[扫码枪] 后台监听已启动: ${req.scannerIp}:${req.scannerPort}，条码匹配规则=${req.barcodeRegex || '(未配置)'}`)
+  } catch (err: any) {
+    scannerRunning.value = false
+    scannerConnected.value = false
+    const msg = err?.message || String(err)
+    scannerLastError.value = msg
+    addLog('error', `[扫码枪] 启动失败: ${msg}`)
+  }
+}
+
+async function pollBarcodeScanner() {
+  try {
+    const res = await pullBarcodeScanner(scannerLastEventId.value)
+    scannerRunning.value = !!res.running
+    scannerConnected.value = !!res.connected
+    if (Array.isArray(res.ioLogs)) {
+      res.ioLogs.forEach((line) => {
+        const text = String(line || '').trim()
+        if (!text) return
+        if (text.includes('RX BARCODE(')) return
+        if (scannerIoSeen.has(text)) return
+        scannerIoSeen.add(text)
+        if (scannerIoSeen.size > 500) scannerIoSeen.clear()
+        addLog('info', text)
+      })
+    }
+    if (res.lastError && res.lastError !== scannerLastError.value) {
+      scannerLastError.value = res.lastError
+      addLog('warn', `[扫码枪] ${res.lastError}`)
+    }
+
+    if (Array.isArray(res.events) && res.events.length) {
+      res.events.forEach((ev) => {
+        scannerLastEventId.value = Math.max(scannerLastEventId.value, Number(ev.id) || 0)
+        const code = String(ev.code || '').trim()
+        if (!code) return
+        scannerQueue.value.push(code)
+        addLog('info', `[扫码枪] 收到条码: ${code}`)
+      })
+    }
+    if (scannerQueue.value.length) await consumeScannerQueue()
+  } catch (err: any) {
+    const msg = err?.message || String(err)
+    if (msg !== scannerLastError.value) {
+      scannerLastError.value = msg
+      addLog('error', `[扫码枪] 轮询失败: ${msg}`)
+    }
+  }
+}
+
+function resetForNextAutoScan() {
+  orderError.value = ''
+  routeError.value = ''
+  routeSteps.value = []
+  materialVerificationSuccess.value = false
+  materialVerificationLoading.value = false
+  scannerAlertMessage.value = ''
+  verifiedMaterials.value = []
+  createdCodes.value = { s: [], p: [], updatedAt: '' }
+  testResult.value = 'IDLE'
+  resultMessage.value = ''
+  setGlobalStatus('待执行', 'idle')
+  activeTab.value = 'route'
+}
+
+async function consumeScannerQueue() {
+  if (scannerConsuming) return
+  scannerConsuming = true
+  try {
+    while (scannerQueue.value.length) {
+      if (orderLoading.value || routeLoading.value || materialVerificationLoading.value) {
+        if (!scannerBusyQueueNotified) {
+          addLog('info', '[扫码枪] 已收到条码，当前流程处理中，结束后会自动处理下一条')
+          scannerBusyQueueNotified = true
+        }
+        break
+      }
+      scannerBusyQueueNotified = false
+
+      const nextCode = scannerQueue.value.shift()
+      if (!nextCode) continue
+
+      if (testResult.value === 'NG' && (productCode.value.trim() || routeSteps.value.length > 0)) {
+        addLog('warn', `[扫码枪] 当前流程为失败状态，忽略新条码: ${nextCode}`)
+        continue
+      }
+
+      if (productCode.value.trim() && testResult.value === 'OK') {
+        resetForNextAutoScan()
+      }
+
+      if (productCode.value.trim() && testResult.value !== 'IDLE') {
+        addLog('warn', `[扫码枪] 当前流程未结束，忽略新条码: ${nextCode}`)
+        continue
+      }
+
+      productCode.value = nextCode
+      await handleScan()
+    }
+  } finally {
+    scannerConsuming = false
+  }
+}
+
+async function submitAllDataToMes(produceInList: Array<{ productCode: string; productCount: number }>): Promise<boolean> {
+  if (!orderInfo.value) return false
 
   setGlobalStatus('正在报工...', 'info')
   const t0 = Date.now()
@@ -747,14 +1006,15 @@ async function submitAllDataToMes(produceInList: Array<{ productCode: string; pr
       resultMessage.value = `报工失败: ${failMsg}`
       addLog('error', `[报工] 失败: ${failMsg}`)
       setGlobalStatus(`报工失败: ${failMsg}`, 'error')
-      return
+      return false
     }
 
     rec.status = 'success'
     testResult.value = 'OK'
-    resultMessage.value = '物料工站流程完成，报工已成功。'
+    resultMessage.value = '报工成功，正在写入日志并执行打印...'
     addLog('success', '[报工] 已成功推送 MES')
-    setGlobalStatus('报工完成', 'success')
+    setGlobalStatus('报工成功，处理中...', 'info')
+    return true
   } catch (err: any) {
     rec.status = 'error'
     rec.resBody = err?.message || String(err)
@@ -762,6 +1022,78 @@ async function submitAllDataToMes(produceInList: Array<{ productCode: string; pr
     resultMessage.value = `报工网络异常: ${err?.message || String(err)}`
     addLog('error', `[报工] 网络异常: ${err?.message || String(err)}`)
     setGlobalStatus(`报工失败: ${err?.message || String(err)}`, 'error')
+    return false
+  }
+}
+
+function collectPrintLabels(): PrintLabelItem[] {
+  const labels: PrintLabelItem[] = []
+  createdCodes.value.s.forEach((code) => {
+    labels.push({ code, type: 'S', typeName: '电池系统' })
+  })
+  createdCodes.value.p.forEach((code) => {
+    labels.push({ code, type: 'P', typeName: '电池包' })
+  })
+  return labels
+}
+
+async function printGeneratedCodesByBarTender() {
+  const labels = collectPrintLabels()
+  if (!labels.length) {
+    addLog('warn', '[打印] 未找到可打印条码，跳过打印')
+    setGlobalStatus('报工完成（未打印）', 'success')
+    resultMessage.value = '物料工站流程完成，报工与日志已完成。'
+    return
+  }
+
+  const reqBody = {
+    barTenderExePath: (config.barTenderExePath || '').trim(),
+    templatePath: (config.barTenderTemplatePath || '').trim(),
+    databasePath: (config.barTenderDatabasePath || '').trim(),
+    labels
+  }
+
+  if (!reqBody.barTenderExePath || !reqBody.templatePath || !reqBody.databasePath) {
+    addLog('error', '[打印] BarTender 路径配置不完整（EXE/模板/数据库）')
+    setGlobalStatus('报工完成，打印失败', 'error')
+    resultMessage.value = '报工成功，但打印失败：BarTender 路径配置不完整。'
+    return
+  }
+
+  setGlobalStatus('正在调用 BarTender 打印...', 'info')
+  const t0 = Date.now()
+  const rec = reactive<ApiRecord>({
+    title: 'BarTender 打印',
+    url: 'http://127.0.0.1:5246/printLabelsByBarTender',
+    status: 'pending',
+    time: new Date().toLocaleTimeString(),
+    reqBody
+  })
+  apiRecords.value.unshift(rec)
+
+  try {
+    const res = await printLabelsByBarTender(reqBody)
+    rec.duration = Date.now() - t0
+    rec.resBody = res
+    if (!res?.success) {
+      const msg = res?.message || 'BarTender 返回失败'
+      rec.status = 'error'
+      addLog('error', `[打印] 失败: ${msg}`)
+      setGlobalStatus('报工完成，打印失败', 'error')
+      resultMessage.value = `报工成功，但打印失败: ${msg}`
+      return
+    }
+
+    rec.status = 'success'
+    addLog('success', `[打印] 打印成功，条码数量: ${labels.length}`)
+    setGlobalStatus('工步列表获取成功，物料校验通过，条码获取成功，报工完成，打印完成', 'success')
+    resultMessage.value = '物料工站流程完成，报工、日志、打印均成功。'
+  } catch (err: any) {
+    rec.status = 'error'
+    rec.resBody = err?.message || String(err)
+    addLog('error', `[打印] 请求异常: ${err?.message || String(err)}`)
+    setGlobalStatus('报工完成，打印失败', 'error')
+    resultMessage.value = `报工成功，但打印请求异常: ${err?.message || String(err)}`
   }
 }
 
@@ -911,13 +1243,13 @@ async function executeReset() {
               ref="scanInputRef"
               v-model="productCode"
               type="text"
-              placeholder="请扫描或输入产品条码"
+              placeholder="仅允许扫码枪输入产品条码"
               class="scan-input"
               :disabled="orderLoading || routeLoading"
-              @keydown.enter="handleScan"
+              readonly
             />
-            <button class="scan-btn" :disabled="orderLoading || !productCode.trim()" @click="handleScan">
-              {{ orderLoading ? '校验中...' : '查询' }}
+            <button class="scan-btn" disabled>
+              仅扫码枪
             </button>
           </div>
           <div class="scan-hint">每次扫码前都会先获取首工单并校验 order_status=下发中 列表</div>
@@ -999,8 +1331,8 @@ async function executeReset() {
             <MaterialScanner
               :steps="routeSteps"
               :remote-check-passed="materialVerificationSuccess"
+              :product-code="productCode"
               @log="handleMaterialScannerLog"
-              @single-complete="handleSingleMaterialScan"
               @complete="handleMaterialComplete"
             />
           </div>

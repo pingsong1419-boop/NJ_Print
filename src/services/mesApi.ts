@@ -5,9 +5,15 @@
   GetRouteRequest,
   GetRouteResponse,
   CompleteCheckInputRequest,
+  SingleCheckInputRequest,
   OrderStatusSelectionState,
   ModulePackCodeCreateRequest,
-  ModulePackCodeCreateResponse
+  ModulePackCodeCreateResponse,
+  BarTenderPrintRequest,
+  BarTenderPrintResponse,
+  BarcodeScannerPullResponse,
+  BarcodeScannerStartRequest,
+  BarcodeScannerStatus
 } from '../types/mes'
 
 async function postRequest<T>(url: string, body: object): Promise<T> {
@@ -47,12 +53,36 @@ export async function completeCheckInput(config: AppConfig, data: CompleteCheckI
   return postRequest<any>(config.fullMaterialApiUrl, data)
 }
 
+export async function singleCheckInput(config: AppConfig, data: SingleCheckInputRequest): Promise<any> {
+  return postRequest<any>(config.singleMaterialApiUrl, data)
+}
+
 export async function pushPackMessageToMes(config: AppConfig, data: any[]): Promise<any> {
   return postRequest<any>(config.mesPushApiUrl, data)
 }
 
 export async function createModulePackCode(config: AppConfig, data: ModulePackCodeCreateRequest): Promise<ModulePackCodeCreateResponse> {
   return postRequest<ModulePackCodeCreateResponse>(config.codeCreateApiUrl, data)
+}
+
+export async function printLabelsByBarTender(data: BarTenderPrintRequest): Promise<BarTenderPrintResponse> {
+  return postRequest<BarTenderPrintResponse>('http://127.0.0.1:5246/printLabelsByBarTender', data)
+}
+
+export async function startBarcodeScanner(data: BarcodeScannerStartRequest): Promise<BarcodeScannerStatus> {
+  return postRequest<BarcodeScannerStatus>('http://127.0.0.1:5246/barcodeScanner/start', data)
+}
+
+export async function stopBarcodeScanner(): Promise<BarcodeScannerStatus> {
+  return postRequest<BarcodeScannerStatus>('http://127.0.0.1:5246/barcodeScanner/stop', {})
+}
+
+export async function pullBarcodeScanner(afterId: number): Promise<BarcodeScannerPullResponse> {
+  const response = await fetch(`http://127.0.0.1:5246/barcodeScanner/pull?afterId=${afterId}`)
+  if (!response.ok) {
+    throw new Error(`获取扫码数据失败: HTTP ${response.status}`)
+  }
+  return (await response.json()) as BarcodeScannerPullResponse
 }
 
 export async function readOrderStatusSelectionFromFile(): Promise<OrderStatusSelectionState | null> {
