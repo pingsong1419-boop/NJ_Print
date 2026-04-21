@@ -4,45 +4,7 @@ using System.Text;
 using System.Text.Json;
 using ScanModule;
 
-public record PrintedHistoryRecord(string Code, string Type, DateTime PrintedAt);
 
-public static class PrintedHistoryStorage
-{
-    private static readonly string HistoryPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "Config", "printed_history.json");
-    private static readonly object _lock = new();
-
-    public static bool Exists(string code)
-    {
-        if (!File.Exists(HistoryPath)) return false;
-        lock (_lock)
-        {
-            var json = File.ReadAllText(HistoryPath);
-            var history = JsonSerializer.Deserialize<List<PrintedHistoryRecord>>(json) ?? new();
-            return history.Any(h => h.Code == code);
-        }
-    }
-
-    public static void Save(string code, string type)
-    {
-        lock (_lock)
-        {
-            var history = new List<PrintedHistoryRecord>();
-            if (File.Exists(HistoryPath))
-            {
-                var json = File.ReadAllText(HistoryPath);
-                history = JsonSerializer.Deserialize<List<PrintedHistoryRecord>>(json) ?? new();
-            }
-            
-            if (!history.Any(h => h.Code == code))
-            {
-                history.Add(new PrintedHistoryRecord(code, type, DateTime.Now));
-                var dir = Path.GetDirectoryName(HistoryPath);
-                if (dir != null && !Directory.Exists(dir)) Directory.CreateDirectory(dir);
-                File.WriteAllText(HistoryPath, JsonSerializer.Serialize(history, new JsonSerializerOptions { WriteIndented = true }));
-            }
-        }
-    }
-}
 
 var builder = WebApplication.CreateBuilder(args);
 var fileJsonOptions = new JsonSerializerOptions
@@ -869,5 +831,67 @@ public record OrderStatusSelectionState(string SelectedCode, string OrderStatus,
 public record PrintByBarTenderRequest(string BarTenderExePath, string TemplatePath, string? DatabasePath, List<PrintLabelItem>? Labels, string? PrinterName);
 public record PrintLabelItem(string Code, string Type, string TypeName);
 public record PrinterInfo(string Name, bool IsDefault, bool WorkOffline, string PrinterStatus);
+
+public record PrintedHistoryRecord(string Code, string Type, DateTime PrintedAt);
+
+public static class PrintedHistoryStorage
+{
+    private static readonly string HistoryPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "Config", "printed_history.json");
+    private static readonly object _lock = new();
+
+    public static bool Exists(string code)
+    {
+        if (!File.Exists(HistoryPath)) return false;
+        lock (_lock)
+        {
+            try
+            {
+                var json = File.ReadAllText(HistoryPath);
+                var history = JsonSerializer.Deserialize<List<PrintedHistoryRecord>>(json) ?? new();
+                return history.Any(h => h.Code == code);
+            }
+            catch { return false; }
+        }
+    }
+
+    public static void Save(string code, string type)
+    {
+        lock (_lock)
+        {
+            var history = new List<PrintedHistoryRecord>();
+            if (File.Exists(HistoryPath))
+            {
+                try
+                {
+                    var json = File.ReadAllText(HistoryPath);
+                    history = JsonSerializer.Deserialize<List<PrintedHistoryRecord>>(json) ?? new();
+                }
+                catch { }
+            }
+            
+            if (!history.Any(h => h.Code == code))
+            {
+                history.Add(new PrintedHistoryRecord(code, type, DateTime.Now));
+                var dir = Path.GetDirectoryName(HistoryPath);
+                if (dir != null && !Directory.Exists(dir)) Directory.CreateDirectory(dir);
+                File.WriteAllText(HistoryPath, JsonSerializer.Serialize(history, new JsonSerializerOptions { WriteIndented = true }));
+            }
+        }
+    }
+
+    public static List<PrintedHistoryRecord> GetList()
+    {
+        if (!File.Exists(HistoryPath)) return new List<PrintedHistoryRecord>();
+        lock (_lock)
+        {
+            try
+            {
+                var json = File.ReadAllText(HistoryPath);
+                return JsonSerializer.Deserialize<List<PrintedHistoryRecord>>(json) ?? new();
+            }
+            catch { return new List<PrintedHistoryRecord>(); }
+        }
+    }
+}
 
 
