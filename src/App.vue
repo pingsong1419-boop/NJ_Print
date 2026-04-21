@@ -1617,7 +1617,11 @@ async function executeReset() {
                 <tbody>
                   <tr v-for="(h, idx) in printedHistory" :key="idx">
                     <td class="mono">{{ h.code }}</td>
-                    <td><span class="badge-type">{{ h.type }}</span></td>
+                    <td>
+                      <span class="badge-type" :class="h.type === 'S' ? 's-code' : 'p-code'">
+                        {{ h.type }}
+                      </span>
+                    </td>
                     <td class="time-col">{{ h.printedAt ? new Date(h.printedAt).toLocaleString() : '--' }}</td>
                   </tr>
                 </tbody>
@@ -2469,5 +2473,114 @@ async function executeReset() {
 .btn-confirm:disabled {
   opacity: 0.6;
   cursor: not-allowed;
+}
+
+/* 打印历史面板优化样式 */
+.history-pane {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  padding: 12px;
+  gap: 12px;
+}
+
+.history-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding-bottom: 8px;
+  border-bottom: 1px solid rgba(144, 202, 249, 0.15);
+}
+
+.history-info {
+  font-size: 13px;
+  color: #b0bec5;
+}
+
+.btn-refresh-mini {
+  padding: 4px 12px;
+  background: rgba(100, 181, 246, 0.1);
+  border: 1px solid #64b5f6;
+  color: #64b5f6;
+  border-radius: 4px;
+  font-size: 12px;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.btn-refresh-mini:hover:not(:disabled) {
+  background: #64b5f6;
+  color: #0d1117;
+}
+
+.btn-refresh-mini:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.history-list-container {
+  flex: 1;
+  overflow: auto;
+  border: 1px solid rgba(144, 202, 249, 0.1);
+  border-radius: 6px;
+  background: rgba(13, 17, 23, 0.3);
+}
+
+.history-table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.history-table th {
+  position: sticky;
+  top: 0;
+  background: #263238;
+  color: #90caf9;
+  text-align: left;
+  padding: 10px 12px;
+  font-size: 12px;
+  font-weight: 600;
+  border-bottom: 2px solid rgba(100, 181, 246, 0.3);
+  z-index: 10;
+}
+
+.history-table td {
+  padding: 8px 12px;
+  font-size: 13px;
+  color: #eceff1;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+}
+
+.history-table tr:hover {
+  background: rgba(100, 181, 246, 0.05);
+}
+
+.badge-type {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  background: #455a64;
+  border-radius: 3px;
+  font-size: 11px;
+  font-weight: bold;
+  color: #fff;
+}
+
+.badge-type.s-code { background: #5c6bc0; }
+.badge-type.p-code { background: #26a69a; }
+
+.history-empty {
+  text-align: center;
+  padding: 40px;
+  color: #546e7a;
+  font-size: 13px;
+}
+
+.time-col {
+  color: #78909c;
+  font-size: 12px;
+  white-space: nowrap;
 }
 </style>

@@ -423,6 +423,12 @@ app.MapPost("/printLabelsByBarTender", async (PrintByBarTenderRequest req) =>
     }
 });
 
+app.MapGet("/api/PrintedHistory/List", () =>
+{
+    var list = PrintedHistoryStorage.GetList();
+    return Results.Ok(list);
+});
+
 app.MapGet("/api/PrintedHistory/Check", (string code) =>
 {
     var exists = PrintedHistoryStorage.Exists(code);
@@ -652,6 +658,7 @@ static string BuildOpenFileDialogScript(string title, string filter)
         "$dlg.Multiselect = $false\n" +
         "$dlg.CheckFileExists = $true\n" +
         "$dlg.CheckPathExists = $true\n" +
+        "$w = New-Object -ComObject WScript.Shell; $w.AppActivate((Get-Process -Id $pid).Id) | Out-Null\n" +
         "if ($dlg.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) { Write-Output $dlg.FileName }";
 }
 
@@ -668,6 +675,7 @@ static string BuildSaveFileDialogScript(string title, string filter, string file
         "$dlg.OverwritePrompt = $false\n" +
         "$dlg.CheckPathExists = $true\n" +
         "$dlg.AddExtension = $true\n" +
+        "$w = New-Object -ComObject WScript.Shell; $w.AppActivate((Get-Process -Id $pid).Id) | Out-Null\n" +
         "if ($dlg.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) { Write-Output $dlg.FileName }";
 }
 
@@ -680,6 +688,7 @@ static string BuildFolderDialogScript(string title)
         "$dlg = New-Object System.Windows.Forms.FolderBrowserDialog\n" +
         $"$dlg.Description = '{EscapePowerShellSingleQuoted(title)}'\n" +
         "$dlg.UseDescriptionForTitle = $true\n" +
+        "$w = New-Object -ComObject WScript.Shell; $w.AppActivate((Get-Process -Id $pid).Id) | Out-Null\n" +
         "if ($dlg.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) { Write-Output $dlg.SelectedPath }";
 }
 

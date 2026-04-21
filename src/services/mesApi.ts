@@ -158,3 +158,11 @@ export async function checkPrintedHistory(code: string): Promise<{ exists: boole
   }
   return (await response.json()) as { exists: boolean }
 }
+
+export async function getPrintedHistoryList(): Promise<any[]> {
+  const response = await fetch('http://127.0.0.1:5246/api/PrintedHistory/List')
+  if (!response.ok) {
+    throw new Error(`获取打印历史失败: HTTP ${response.status}`)
+  }
+  return (await response.json()) as any[]
+}
