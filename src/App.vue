@@ -1162,7 +1162,7 @@ async function submitAllDataToMes(produceInList: Array<{ productCode: string; pr
     technicsProcessName: config.technicsProcessName || '',
     technicsStepCode: 'STEP1',
     technicsStepName: '物料绑定',
-    productCode: productCode.value,
+    productCode: (produceInList && produceInList.length > 0) ? produceInList[0].productCode : productCode.value,
     productCount: produceInList.length,
     productQuality: 0,
     produceDate: nowDate,
