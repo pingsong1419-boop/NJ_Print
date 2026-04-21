@@ -15,7 +15,8 @@ import {
   readOrderStatusSelectionFromFile,
   saveOrderStatusSelectionToFile,
   readAppConfigFromFile,
-  saveAppConfigToFile
+  saveAppConfigToFile,
+  checkPrintedHistory
 } from './services/mesApi'
 import ConfigModal from './components/ConfigModal.vue'
 import RouteTable from './components/RouteTable.vue'
@@ -492,6 +493,24 @@ async function runPrintTest() {
 
   printTestLoading.value = true
   printTestResultLevel.value = 'idle'
+  
+  // 新增需求：在打印前校验数据库历史记录
+  printTestResult.value = '正在核对数据库记录...'
+  try {
+    const history = await checkPrintedHistory(barcode)
+    if (!history.exists) {
+      printTestResultLevel.value = 'error'
+      printTestResult.value = `该条码 [${barcode}] 不存在于系统打印历史记录中，拒绝测试打印。`
+      addLog('warn', `[打印测试] 拒绝打印：条码未在数据库中匹配到`)
+      alert(printTestResult.value)
+      printTestLoading.value = false
+      return
+    }
+    addLog('info', `[打印测试] 记录匹配成功，准备执行打印任务...`)
+  } catch (err: any) {
+    addLog('warn', `[打印测试] 无法连接历史数据库，跳过安全校验: ${err?.message || String(err)}`)
+  }
+
   printTestResult.value = '步骤1/2 提交打印命令...'
   addLog('info', `[打印测试] 步骤1/2 开始打印，条码=${barcode}`)
 

@@ -1,4 +1,4 @@
-﻿import type {
+import type {
   AppConfig,
   GetOrderRequest,
   GetOrderResponse,
@@ -149,4 +149,12 @@ export async function saveAppConfigToFile(config: AppConfig): Promise<void> {
   if (!response.ok) {
     throw new Error(`保存配置文件失败: HTTP ${response.status}`)
   }
+}
+
+export async function checkPrintedHistory(code: string): Promise<{ exists: boolean }> {
+  const response = await fetch(`http://127.0.0.1:5246/api/PrintedHistory/Check?code=${encodeURIComponent(code)}`)
+  if (!response.ok) {
+    throw new Error(`查询打印历史失败: HTTP ${response.status}`)
+  }
+  return (await response.json()) as { exists: boolean }
 }

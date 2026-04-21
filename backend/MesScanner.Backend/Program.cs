@@ -4,6 +4,46 @@ using System.Text;
 using System.Text.Json;
 using ScanModule;
 
+public record PrintedHistoryRecord(string Code, string Type, DateTime PrintedAt);
+
+public static class PrintedHistoryStorage
+{
+    private static readonly string HistoryPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "Config", "printed_history.json");
+    private static readonly object _lock = new();
+
+    public static bool Exists(string code)
+    {
+        if (!File.Exists(HistoryPath)) return false;
+        lock (_lock)
+        {
+            var json = File.ReadAllText(HistoryPath);
+            var history = JsonSerializer.Deserialize<List<PrintedHistoryRecord>>(json) ?? new();
+            return history.Any(h => h.Code == code);
+        }
+    }
+
+    public static void Save(string code, string type)
+    {
+        lock (_lock)
+        {
+            var history = new List<PrintedHistoryRecord>();
+            if (File.Exists(HistoryPath))
+            {
+                var json = File.ReadAllText(HistoryPath);
+                history = JsonSerializer.Deserialize<List<PrintedHistoryRecord>>(json) ?? new();
+            }
+            
+            if (!history.Any(h => h.Code == code))
+            {
+                history.Add(new PrintedHistoryRecord(code, type, DateTime.Now));
+                var dir = Path.GetDirectoryName(HistoryPath);
+                if (dir != null && !Directory.Exists(dir)) Directory.CreateDirectory(dir);
+                File.WriteAllText(HistoryPath, JsonSerializer.Serialize(history, new JsonSerializerOptions { WriteIndented = true }));
+            }
+        }
+    }
+}
+
 var builder = WebApplication.CreateBuilder(args);
 var fileJsonOptions = new JsonSerializerOptions
 {
@@ -391,21 +431,40 @@ app.MapPost("/printLabelsByBarTender", async (PrintByBarTenderRequest req) =>
             });
         }
 
-        return Results.Ok(new
+        try
         {
-            success = true,
-            message = "BarTender 打印命令已执行（已提交到打印队列）",
-            exitCode = process.ExitCode,
-            command = $"{psi.FileName} {psi.Arguments}",
-            output = stdout,
-            dataFilePath,
-            printerUsed = printerName
-        });
+            // 成功执行后，将条码保存到历史记录中
+            foreach (var label in validLabels)
+            {
+                PrintedHistoryStorage.Save(label.Code, label.Type);
+            }
+
+            return Results.Ok(new
+            {
+                success = true,
+                message = "BarTender 打印命令已执行（已提交到打印队列）",
+                exitCode = process.ExitCode,
+                command = $"{psi.FileName} {psi.Arguments}",
+                output = stdout,
+                dataFilePath,
+                printerUsed = printerName
+            });
+        }
+        catch (Exception ex)
+        {
+            return Results.Ok(new { success = false, message = $"打印成功但记录保存失败: {ex.Message}" });
+        }
     }
     catch (Exception ex)
     {
-        return Results.Ok(new { success = false, message = $"BarTender 调用异常: {ex.Message}" });
+        return Results.Ok(new { success = false, message = $"系统处理打印请求时发生异常: {ex.Message}" });
     }
+});
+
+app.MapGet("/api/PrintedHistory/Check", (string code) =>
+{
+    var exists = PrintedHistoryStorage.Exists(code);
+    return Results.Ok(new { exists });
 });
 
 app.Run();
