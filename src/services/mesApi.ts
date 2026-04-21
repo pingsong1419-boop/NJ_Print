@@ -11,6 +11,8 @@
   ModulePackCodeCreateResponse,
   BarTenderPrintRequest,
   BarTenderPrintResponse,
+  PathPickerResponse,
+  PathPickerTarget,
   BarcodeScannerPullResponse,
   BarcodeScannerStartRequest,
   BarcodeScannerStatus
@@ -69,6 +71,10 @@ export async function printLabelsByBarTender(data: BarTenderPrintRequest): Promi
   return postRequest<BarTenderPrintResponse>('http://127.0.0.1:5246/printLabelsByBarTender', data)
 }
 
+export async function selectPathByDialog(target: PathPickerTarget): Promise<PathPickerResponse> {
+  return postRequest<PathPickerResponse>('http://127.0.0.1:5246/pathPicker/select', { target })
+}
+
 export async function startBarcodeScanner(data: BarcodeScannerStartRequest): Promise<BarcodeScannerStatus> {
   return postRequest<BarcodeScannerStatus>('http://127.0.0.1:5246/barcodeScanner/start', data)
 }
@@ -116,5 +122,31 @@ export async function saveOrderStatusSelectionToFile(state: OrderStatusSelection
 
   if (!response.ok) {
     throw new Error(`保存状态文件失败: HTTP ${response.status}`)
+  }
+}
+
+export async function readAppConfigFromFile(): Promise<Partial<AppConfig> | null> {
+  const response = await fetch('http://127.0.0.1:5246/appConfig')
+  if (response.status === 404) return null
+  if (!response.ok) {
+    throw new Error(`读取配置文件失败: HTTP ${response.status}`)
+  }
+
+  const data = (await response.json()) as Partial<AppConfig> & { exists?: boolean }
+  if (data.exists === false) return null
+  return data
+}
+
+export async function saveAppConfigToFile(config: AppConfig): Promise<void> {
+  const response = await fetch('http://127.0.0.1:5246/appConfig', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Accept: 'application/json'
+    },
+    body: JSON.stringify(config)
+  })
+  if (!response.ok) {
+    throw new Error(`保存配置文件失败: HTTP ${response.status}`)
   }
 }

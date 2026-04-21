@@ -1,6 +1,6 @@
-﻿<script setup lang="ts">
+<script setup lang="ts">
 import { ref, reactive, onMounted, onUnmounted, nextTick, computed } from 'vue'
-import type { AppConfig, ModulePackCodeCreateRequest, OrderInfo, PrintLabelItem, RouteStep, TestResult, User } from './types/mes'
+import type { AppConfig, ModulePackCodeCreateRequest, OrderInfo, PathPickerTarget, PrintLabelItem, RouteStep, TestResult, User } from './types/mes'
 import {
   getOrderByProcess,
   getRouteList,
@@ -9,10 +9,13 @@ import {
   pushPackMessageToMes,
   createModulePackCode,
   printLabelsByBarTender,
+  selectPathByDialog,
   pullBarcodeScanner,
   startBarcodeScanner,
   readOrderStatusSelectionFromFile,
-  saveOrderStatusSelectionToFile
+  saveOrderStatusSelectionToFile,
+  readAppConfigFromFile,
+  saveAppConfigToFile
 } from './services/mesApi'
 import ConfigModal from './components/ConfigModal.vue'
 import RouteTable from './components/RouteTable.vue'
@@ -22,6 +25,9 @@ import MaterialScanner from './components/MaterialScanner.vue'
 import LoginModal from './components/LoginModal.vue'
 
 const CONFIG_KEY = 'mes_app_config_v3'
+const DEFAULT_CONFIG_LOG_PATH = 'Logs'
+const DEFAULT_CONFIG_BARTENDER_DB1 = 'pack_labels_1.csv'
+const DEFAULT_CONFIG_BARTENDER_DB2 = 'pack_labels_2.csv'
 const DEFAULT_CONFIG: AppConfig = {
   orderApiUrl: '/mes-api/api/OrderInfo/GetSourceOrderInfoByProcess',
   routeApiUrl: '/mes-api/api/OrderInfo/GetTechRouteListByCode',
@@ -30,8 +36,12 @@ const DEFAULT_CONFIG: AppConfig = {
   codeCreateApiUrl: 'http://172.25.57.144:8034/api/CodeCreate/ModulePackCodeCreate',
   mesPushApiUrl: '/mes-push/api/ProduceMessage/PushPackMessageToMes',
   barTenderExePath: 'C:\\Program Files\\Seagull\\BarTender Suite\\bartend.exe',
-  barTenderTemplatePath: 'C:\\BarTender\\Templates\\pack_label.btw',
-  barTenderDatabasePath: 'C:\\BarTender\\Data\\pack_labels.csv',
+  barTenderTemplatePath1: 'C:\\BarTender\\Templates\\pack_label_1.btw',
+  barTenderTemplatePath2: 'C:\\BarTender\\Templates\\pack_label_2.btw',
+  barTenderDatabasePath1: DEFAULT_CONFIG_BARTENDER_DB1,
+  barTenderDatabasePath2: DEFAULT_CONFIG_BARTENDER_DB2,
+  barTenderTemplatePath: 'C:\\BarTender\\Templates\\pack_label_1.btw',
+  barTenderDatabasePath: DEFAULT_CONFIG_BARTENDER_DB1,
   scannerIp: '172.25.57.144',
   scannerPort: 3000,
   barcodeMatchRegex: '^[0-9A-Za-z]{30}$',
@@ -41,25 +51,52 @@ const DEFAULT_CONFIG: AppConfig = {
   userAccount: 'admin',
   deviceCode: '',
   deviceName: '',
-  logSavePath: 'C:\\NJ_Material_Logs',
+  logSavePath: DEFAULT_CONFIG_LOG_PATH,
   adminUsername: 'admin',
   adminPassword: '123'
+}
+
+function normalizeConfig(input?: Partial<AppConfig> | null): AppConfig {
+  const merged = { ...DEFAULT_CONFIG, ...(input || {}) } as AppConfig
+
+  const legacyTemplate = String((input as any)?.barTenderTemplatePath ?? merged.barTenderTemplatePath ?? '').trim()
+  const legacyDatabase = String((input as any)?.barTenderDatabasePath ?? merged.barTenderDatabasePath ?? '').trim()
+
+  merged.barTenderTemplatePath1 = String(merged.barTenderTemplatePath1 || legacyTemplate || DEFAULT_CONFIG.barTenderTemplatePath1).trim()
+  merged.barTenderTemplatePath2 = String(merged.barTenderTemplatePath2 || legacyTemplate || merged.barTenderTemplatePath1).trim()
+  merged.barTenderDatabasePath1 = String(merged.barTenderDatabasePath1 || legacyDatabase || DEFAULT_CONFIG.barTenderDatabasePath1).trim()
+  merged.barTenderDatabasePath2 = String(merged.barTenderDatabasePath2 || legacyDatabase || merged.barTenderDatabasePath1).trim()
+
+  merged.barTenderTemplatePath = merged.barTenderTemplatePath1
+  merged.barTenderDatabasePath = merged.barTenderDatabasePath1
+
+  if (merged.orderApiUrl === '/mes-api/api/OrderInfo/GetOtherOrderInfoByProcess') {
+    merged.orderApiUrl = '/mes-api/api/OrderInfo/GetSourceOrderInfoByProcess'
+  }
+  if (!merged.logSavePath || merged.logSavePath === 'C:\\NJ_Material_Logs') {
+    merged.logSavePath = DEFAULT_CONFIG_LOG_PATH
+  }
+  if (!merged.barTenderDatabasePath1 || merged.barTenderDatabasePath1 === 'C:\\BarTender\\Data\\pack_labels.csv') {
+    merged.barTenderDatabasePath1 = DEFAULT_CONFIG_BARTENDER_DB1
+  }
+  if (!merged.barTenderDatabasePath2 || merged.barTenderDatabasePath2 === 'C:\\BarTender\\Data\\pack_labels.csv') {
+    merged.barTenderDatabasePath2 = DEFAULT_CONFIG_BARTENDER_DB2
+  }
+  merged.barTenderDatabasePath = merged.barTenderDatabasePath1
+
+  return merged
 }
 
 function loadConfig(): AppConfig {
   try {
     const raw = localStorage.getItem(CONFIG_KEY)
     if (raw) {
-      const merged = { ...DEFAULT_CONFIG, ...JSON.parse(raw) } as AppConfig
-      if (merged.orderApiUrl === '/mes-api/api/OrderInfo/GetOtherOrderInfoByProcess') {
-        merged.orderApiUrl = '/mes-api/api/OrderInfo/GetSourceOrderInfoByProcess'
-      }
-      return merged
+      return normalizeConfig(JSON.parse(raw) as Partial<AppConfig>)
     }
   } catch {
     // ignore parse errors and use defaults
   }
-  return { ...DEFAULT_CONFIG }
+  return normalizeConfig(DEFAULT_CONFIG)
 }
 
 function getOrderCode(order: Partial<OrderInfo> | null | undefined): string {
@@ -127,14 +164,25 @@ function formatDateYYYYMMDD(date: Date): string {
   return `${year}-${month}-${day}`
 }
 
+function normalizeScannedCode(code: string): string {
+  return String(code || '')
+    .replace(/[\u0000-\u001F\u007F-\u009F\u200B-\u200D\uFEFF]/g, '')
+    .trim()
+}
+
 function validateProductBarcode(code: string): { ok: boolean; message?: string } {
   const rawPattern = (config.barcodeMatchRegex || '').trim()
+  const normalizedCode = normalizeScannedCode(code)
   if (!rawPattern) return { ok: true }
 
   try {
     const regex = new RegExp(rawPattern)
-    if (regex.test(code)) return { ok: true }
-    return { ok: false, message: `产品条码不匹配规则: ${code} (正则不匹配)` }
+    if (regex.test(normalizedCode)) return { ok: true }
+    const normalizeTip = normalizedCode.length !== code.length ? `, 原始长度=${code.length}` : ''
+    return {
+      ok: false,
+      message: `产品条码不匹配规则: ${normalizedCode} (长度=${normalizedCode.length}${normalizeTip}, 正则=${rawPattern})`
+    }
   } catch (err: any) {
     return { ok: false, message: `产品条码规则无效: ${err?.message || String(err)}` }
   }
@@ -283,8 +331,34 @@ const config = reactive<AppConfig>(loadConfig())
 const showConfig = ref(false)
 const showLogin = ref(false)
 const currentUser = ref<User | null>(null)
+async function persistConfigToStores() {
+  const normalized = normalizeConfig(config)
+  Object.assign(config, normalized)
+  localStorage.setItem(CONFIG_KEY, JSON.stringify(normalized))
+  try {
+    await saveAppConfigToFile(normalized)
+  } catch (err: any) {
+    addLog('warn', `[配置] 保存到 Config 文件失败: ${err?.message || String(err)}`)
+  }
+}
+
+async function hydrateConfigFromFile() {
+  try {
+    const fileConfig = await readAppConfigFromFile()
+    if (!fileConfig) return
+    const normalized = normalizeConfig({ ...config, ...fileConfig })
+    Object.assign(config, normalized)
+    localStorage.setItem(CONFIG_KEY, JSON.stringify(normalized))
+    syncPrintTestPathsFromConfig()
+    addLog('info', '[配置] 已从 Config\\app_config.json 读取参数')
+  } catch (err: any) {
+    addLog('warn', `[配置] 读取 Config 文件失败，使用本地配置: ${err?.message || String(err)}`)
+  }
+}
+
 const onConfigSaved = async () => {
-  localStorage.setItem(CONFIG_KEY, JSON.stringify(config))
+  await persistConfigToStores()
+  syncPrintTestPathsFromConfig()
   await restartBarcodeScanner()
 }
 
@@ -303,7 +377,7 @@ const testResult = ref<TestResult>('IDLE')
 const resultMessage = ref('')
 const logs = ref<{ time: string; level: 'info' | 'success' | 'warn' | 'error'; msg: string }[]>([])
 const apiRecords = ref<ApiRecord[]>([])
-const activeTab = ref<'route' | 'material' | 'code' | 'api' | 'log'>('route')
+const activeTab = ref<'route' | 'material' | 'code' | 'print' | 'api' | 'log'>('route')
 
 const materialVerificationLoading = ref(false)
 const materialVerificationSuccess = ref(false)
@@ -327,6 +401,135 @@ const materialTaskCount = computed(() => {
   return total
 })
 const createdCodeCount = computed(() => createdCodes.value.s.length + createdCodes.value.p.length)
+const printTestForm = reactive<{
+  templatePath: string
+  databasePath: string
+  barcodeText: string
+}>({
+  templatePath: (config.barTenderTemplatePath1 || '').trim(),
+  databasePath: (config.barTenderDatabasePath1 || '').trim(),
+  barcodeText: ''
+})
+const printTestLoading = ref(false)
+const printTestResult = ref('')
+const printTestResultLevel = ref<'idle' | 'success' | 'error'>('idle')
+type PrintPathField = 'templatePath' | 'databasePath'
+const pickingPathField = ref<PrintPathField | ''>('')
+
+const printPathFieldMeta: Record<PrintPathField, { target: PathPickerTarget; label: string }> = {
+  templatePath: { target: 'template', label: '模板路径' },
+  databasePath: { target: 'database', label: '数据库路径' }
+}
+
+function persistPrintTestPathToConfig() {
+  const templatePath = String(printTestForm.templatePath || '').trim()
+  const databasePath = String(printTestForm.databasePath || '').trim()
+  printTestForm.templatePath = templatePath
+  printTestForm.databasePath = databasePath
+  config.barTenderTemplatePath1 = templatePath
+  config.barTenderTemplatePath = templatePath
+  config.barTenderDatabasePath1 = databasePath
+  config.barTenderDatabasePath = databasePath
+  void persistConfigToStores()
+}
+
+function syncPrintTestPathsFromConfig() {
+  printTestForm.templatePath = (config.barTenderTemplatePath1 || '').trim()
+  printTestForm.databasePath = (config.barTenderDatabasePath1 || '').trim()
+}
+
+async function pickPrintTestPath(field: PrintPathField) {
+  if (printTestLoading.value || pickingPathField.value) return
+
+  const meta = printPathFieldMeta[field]
+  pickingPathField.value = field
+  try {
+    const res = await selectPathByDialog(meta.target)
+    if (res?.cancelled) {
+      addLog('info', `[打印测试] 已取消选择 ${meta.label}`)
+      return
+    }
+
+    const selectedPath = String(res?.path || '').trim().replace(/\//g, '\\')
+    if (!res?.success || !selectedPath) {
+      const msg = res?.message || '未返回路径'
+      addLog('warn', `[打印测试] 选择 ${meta.label} 失败: ${msg}`)
+      return
+    }
+
+    printTestForm[field] = selectedPath
+    persistPrintTestPathToConfig()
+    addLog('success', `[打印测试] 已选择 ${meta.label}: ${selectedPath}`)
+  } catch (err: any) {
+    const msg = err?.message || String(err)
+    addLog('error', `[打印测试] 选择 ${meta.label} 异常: ${msg}`)
+  } finally {
+    pickingPathField.value = ''
+  }
+}
+
+async function runPrintTest() {
+  const barTenderExePath = (config.barTenderExePath || '').trim()
+  const templatePath = (printTestForm.templatePath || '').trim()
+  const databasePath = (printTestForm.databasePath || '').trim()
+  const barcode = normalizeScannedCode(printTestForm.barcodeText)
+  persistPrintTestPathToConfig()
+
+  if (!barTenderExePath || !templatePath || !databasePath) {
+    printTestResultLevel.value = 'error'
+    printTestResult.value = '请先填写 BarTender EXE 路径、模板路径和数据库路径'
+    addLog('error', '[打印测试] 路径配置不完整（EXE/模板/数据库）')
+    alert(printTestResult.value)
+    return
+  }
+  if (!barcode) {
+    printTestResultLevel.value = 'error'
+    printTestResult.value = '请先输入要打印的条码'
+    addLog('error', '[打印测试] 未输入打印条码')
+    alert(printTestResult.value)
+    return
+  }
+
+  printTestLoading.value = true
+  printTestResultLevel.value = 'idle'
+  printTestResult.value = '步骤1/2 提交打印命令...'
+  addLog('info', `[打印测试] 步骤1/2 开始打印，条码=${barcode}`)
+
+  try {
+    const res = await printLabelsByBarTender({
+      barTenderExePath,
+      templatePath,
+      databasePath,
+      labels: [{ code: barcode, type: 'S', typeName: '测试条码' }]
+    })
+
+    if (!res?.success) {
+      const msg = res?.message || 'BarTender 返回失败'
+      printTestResultLevel.value = 'error'
+      const cmd = String(res?.command || '').trim()
+      printTestResult.value = cmd ? `打印失败: ${msg} | 命令: ${cmd}` : `打印失败: ${msg}`
+      addLog('error', `[打印测试] 失败: ${msg}${cmd ? ` | ${cmd}` : ''}`)
+      alert(printTestResult.value)
+      return
+    }
+
+    const okMsg = String(res?.message || 'BarTender 已执行')
+    const okCmd = String(res?.command || '').trim()
+    printTestResult.value = okCmd ? `步骤2/2 打印完成：${okMsg} | 命令: ${okCmd}` : `步骤2/2 打印完成：${okMsg}`
+    printTestResultLevel.value = 'success'
+    addLog('success', '[打印测试] 步骤2/2 完成，打印命令执行成功')
+    alert(`打印流程已执行完成。\n${okMsg}`)
+  } catch (err: any) {
+    const msg = err?.message || String(err)
+    printTestResultLevel.value = 'error'
+    printTestResult.value = `打印请求异常: ${msg}`
+    addLog('error', `[打印测试] 请求异常: ${msg}`)
+    alert(printTestResult.value)
+  } finally {
+    printTestLoading.value = false
+  }
+}
+
 const globalStatusText = ref('待执行')
 const globalStatusLevel = ref<'idle' | 'info' | 'success' | 'error'>('idle')
 
@@ -557,6 +760,7 @@ async function initializeOrderStatusCheck() {
 
 onMounted(async () => {
   focusScan()
+  await hydrateConfigFromFile()
   await initializeOrderStatusCheck()
   await restartBarcodeScanner()
   await pollBarcodeScanner().catch(() => {
@@ -582,7 +786,8 @@ onUnmounted(async () => {
 })
 
 async function handleScan() {
-  const code = productCode.value.trim()
+  const code = normalizeScannedCode(productCode.value)
+  productCode.value = code
   if (!code || !config.technicsProcessCode) return
 
   const validation = validateProductBarcode(code)
@@ -872,10 +1077,10 @@ async function pollBarcodeScanner() {
     if (Array.isArray(res.events) && res.events.length) {
       res.events.forEach((ev) => {
         scannerLastEventId.value = Math.max(scannerLastEventId.value, Number(ev.id) || 0)
-        const code = String(ev.code || '').trim()
+        const code = normalizeScannedCode(String(ev.code || ''))
         if (!code) return
         scannerQueue.value.push(code)
-        addLog('info', `[扫码枪] 收到条码: ${code}`)
+        addLog('info', `[扫码枪] 收到条码: ${code} (len=${code.length})`)
       })
     }
     if (scannerQueue.value.length) await consumeScannerQueue()
@@ -1041,35 +1246,79 @@ async function printGeneratedCodesByBarTender() {
     return
   }
 
-  const reqBody = {
-    barTenderExePath: (config.barTenderExePath || '').trim(),
-    templatePath: (config.barTenderTemplatePath || '').trim(),
-    databasePath: (config.barTenderDatabasePath || '').trim(),
-    labels
-  }
+  const barTenderExePath = (config.barTenderExePath || '').trim()
+  const printJobs = [
+    {
+      name: '模板1',
+      templatePath: (config.barTenderTemplatePath1 || '').trim(),
+      databasePath: (config.barTenderDatabasePath1 || '').trim()
+    },
+    {
+      name: '模板2',
+      templatePath: (config.barTenderTemplatePath2 || '').trim(),
+      databasePath: (config.barTenderDatabasePath2 || '').trim()
+    }
+  ]
 
-  if (!reqBody.barTenderExePath || !reqBody.templatePath || !reqBody.databasePath) {
-    addLog('error', '[打印] BarTender 路径配置不完整（EXE/模板/数据库）')
-    setGlobalStatus('报工完成，打印失败', 'error')
-    resultMessage.value = '报工成功，但打印失败：BarTender 路径配置不完整。'
+  // 允许部分模板为空，只要有一个能打就行
+  const activeJobs = printJobs.filter(job => job.templatePath && job.databasePath)
+  
+  if (!barTenderExePath || activeJobs.length === 0) {
+    addLog('error', '[打印] 配置不完整：需要 BarTender EXE 路径且至少配置一个有效的模板+数据库路径')
+    setGlobalStatus('报工完成，打印未配置', 'error')
+    resultMessage.value = '报工成功，但打印配置不完整（EXE/模板/数据库）。'
     return
   }
 
-  setGlobalStatus('正在调用 BarTender 打印...', 'info')
-
   try {
-    const res = await printLabelsByBarTender(reqBody)
-    if (!res?.success) {
-      const msg = res?.message || 'BarTender 返回失败'
-      addLog('error', `[打印] 失败: ${msg}`)
-      setGlobalStatus('报工完成，打印失败', 'error')
-      resultMessage.value = `报工成功，但打印失败: ${msg}`
-      return
+    for (let i = 0; i < activeJobs.length; i++) {
+      const job = activeJobs[i]
+      
+      // 如果是第二个及以后的任务，先等待 1.5 秒，防止 BarTender 数据刷新碰撞
+      if (i > 0) {
+        addLog('info', `[打印] 正在等待 1500ms 后执行 ${job.name}...`)
+        await new Promise(resolve => setTimeout(resolve, 1500))
+      }
+
+      const jobType = job.name === '模板1' ? 'P' : 'S'
+      const jobLabels = labels.filter((l) => l.type === jobType)
+
+      if (jobLabels.length === 0) {
+        addLog('warn', `[打印] ${job.name} (${jobType}码) 跳过，因为未获取到该类型的条码数据`)
+        continue
+      }
+
+      addLog('info', `[打印] 正在执行 ${job.name}，包含 ${jobLabels.length} 条 ${jobType} 码`)
+      setGlobalStatus(`正在调用 BarTender 打印（${job.name}）...`, 'info')
+
+      const res = await printLabelsByBarTender({
+        barTenderExePath,
+        templatePath: job.templatePath,
+        databasePath: job.databasePath,
+        labels: jobLabels
+      })
+
+      if (!res?.success) {
+        const msg = res?.message || 'BarTender 返回失败'
+        addLog('error', `[打印] ${job.name} 失败: ${msg}`)
+        setGlobalStatus('报工部分成功，打印中断', 'error')
+        resultMessage.value = `报工成功，但 ${job.name} 打印失败: ${msg}`
+        return
+      }
+
+      addLog('success', `[打印] ${job.name} 打印成功`)
     }
 
-    addLog('success', `[打印] 打印成功，条码数量: ${labels.length}`)
-    setGlobalStatus('工步列表获取成功，物料校验通过，条码获取成功，报工完成，打印完成', 'success')
+    setGlobalStatus('流程全部完成', 'success')
     resultMessage.value = '物料工站流程完成，报工、日志、打印均成功。'
+
+    // 恢复自动复位：3秒延迟
+    addLog('info', '[系统] 流程已全部完成，3秒后将自动复位...')
+    setTimeout(() => {
+      if (resultMessage.value === '物料工站流程完成，报工、日志、打印均成功。') {
+        resetResult()
+      }
+    }, 3000)
   } catch (err: any) {
     addLog('error', `[打印] 请求异常: ${err?.message || String(err)}`)
     setGlobalStatus('报工完成，打印失败', 'error')
@@ -1293,6 +1542,9 @@ async function executeReset() {
             接口交互
             <span v-if="apiRecords.length" class="tab-count">{{ apiRecords.length }}</span>
           </button>
+          <button class="tab-btn" :class="{ active: activeTab === 'print' }" @click="activeTab = 'print'">
+            打印测试
+          </button>
           <button class="tab-btn" :class="{ active: activeTab === 'log' }" @click="activeTab = 'log'">
             操作日志
             <span v-if="logs.length" class="tab-count">{{ logs.length }}</span>
@@ -1329,6 +1581,44 @@ async function executeReset() {
                 <div class="code-value mono">{{ createdCodes.p.join(', ') }}</div>
               </div>
               <div class="code-time">获取时间：{{ createdCodes.updatedAt || '--' }}</div>
+            </div>
+          </div>
+
+          <div v-show="activeTab === 'print'" class="tab-pane print-test-pane">
+            <div class="print-test-grid">
+              <div class="field-group">
+                <label>数据库路径 (.txt/.csv)</label>
+                <div class="path-input-row">
+                  <input v-model="printTestForm.databasePath" type="text" class="print-input mono" @blur="persistPrintTestPathToConfig" />
+                  <button
+                    class="path-pick-btn"
+                    type="button"
+                    :disabled="printTestLoading || !!pickingPathField"
+                    @click="pickPrintTestPath('databasePath')"
+                  >
+                    {{ pickingPathField === 'databasePath' ? '选择中...' : '选择' }}
+                  </button>
+                </div>
+              </div>
+
+              <div class="field-group">
+                <label>打印条码</label>
+                <textarea
+                  v-model="printTestForm.barcodeText"
+                  class="print-textarea mono"
+                  placeholder="示例：&#10;03HPB0KH0001FDG318000010"
+                />
+              </div>
+            </div>
+
+            <div class="print-test-actions">
+              <button class="btn-save" :disabled="printTestLoading" @click="runPrintTest">
+                {{ printTestLoading ? '打印中...' : '执行打印' }}
+              </button>
+            </div>
+
+            <div v-if="printTestResult" class="print-test-result" :class="printTestResultLevel">
+              {{ printTestResult }}
             </div>
           </div>
 
@@ -1815,6 +2105,145 @@ async function executeReset() {
   color: #78909c;
   font-size: 12px;
   padding: 0 2px;
+}
+
+.print-test-pane {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px;
+  overflow: auto;
+}
+
+.print-test-grid {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.field-group {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.field-group label {
+  font-size: 12px;
+  color: #90caf9;
+}
+
+.field-inline {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+}
+
+.path-input-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.path-input-row .print-input {
+  flex: 1;
+}
+
+.path-pick-btn {
+  border: 1px solid rgba(100, 181, 246, 0.28);
+  background: rgba(21, 101, 192, 0.18);
+  color: #e3f2fd;
+  border-radius: 6px;
+  font-size: 12px;
+  padding: 0 14px;
+  height: 36px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.path-pick-btn:hover:not(:disabled) {
+  background: rgba(21, 101, 192, 0.35);
+  border-color: rgba(100, 181, 246, 0.45);
+}
+
+.path-pick-btn:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.print-input,
+.print-textarea {
+  width: 100%;
+  background: #0d1117;
+  border: 1px solid rgba(100, 181, 246, 0.2);
+  border-radius: 6px;
+  color: #e0e6ed;
+  padding: 9px 12px;
+  font-size: 13px;
+  outline: none;
+}
+
+.print-input:focus,
+.print-textarea:focus {
+  border-color: #42a5f5;
+  box-shadow: 0 0 0 3px rgba(66, 165, 245, 0.15);
+}
+
+.print-textarea {
+  min-height: 120px;
+  resize: vertical;
+}
+
+.print-test-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+}
+
+.btn-save {
+  min-width: 120px;
+  height: 38px;
+  padding: 0 18px;
+  border-radius: 8px;
+  border: 1px solid rgba(100, 181, 246, 0.35);
+  background: linear-gradient(135deg, #1565c0, #0d47a1);
+  color: #e3f2fd;
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.btn-save:hover:not(:disabled) {
+  background: linear-gradient(135deg, #1976d2, #1565c0);
+  border-color: rgba(100, 181, 246, 0.6);
+  box-shadow: 0 4px 12px rgba(21, 101, 192, 0.35);
+}
+
+.btn-save:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+  box-shadow: none;
+}
+
+.print-test-result {
+  border-radius: 6px;
+  padding: 8px 10px;
+  font-size: 12px;
+}
+
+.print-test-result.idle {
+  background: rgba(120, 144, 156, 0.12);
+  color: #b0bec5;
+}
+
+.print-test-result.success {
+  background: rgba(0, 230, 118, 0.12);
+  color: #a5d6a7;
+}
+
+.print-test-result.error {
+  background: rgba(244, 67, 54, 0.12);
+  color: #ef9a9a;
 }
 
 .log-pane {

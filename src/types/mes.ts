@@ -6,8 +6,12 @@ export interface AppConfig {
   codeCreateApiUrl: string
   mesPushApiUrl: string
   barTenderExePath: string
-  barTenderTemplatePath: string
-  barTenderDatabasePath: string
+  barTenderTemplatePath1: string
+  barTenderTemplatePath2: string
+  barTenderDatabasePath1: string
+  barTenderDatabasePath2: string
+  barTenderTemplatePath?: string
+  barTenderDatabasePath?: string
   scannerIp: string
   scannerPort: number
   barcodeMatchRegex: string
@@ -174,8 +178,8 @@ export interface PrintLabelItem {
 export interface BarTenderPrintRequest {
   barTenderExePath: string
   templatePath: string
-  databasePath: string
-  labels: PrintLabelItem[]
+  databasePath?: string
+  labels?: PrintLabelItem[]
 }
 
 export interface BarTenderPrintResponse {
@@ -184,6 +188,21 @@ export interface BarTenderPrintResponse {
   command?: string
   exitCode?: number | null
   dataFilePath?: string
+}
+
+export type PathPickerTarget =
+  | 'bartenderExe'
+  | 'template'
+  | 'database'
+  | 'qrFile'
+  | 'barFile'
+  | 'folder'
+
+export interface PathPickerResponse {
+  success?: boolean
+  cancelled?: boolean
+  path?: string
+  message?: string
 }
 
 export interface BarcodeScannerStartRequest {

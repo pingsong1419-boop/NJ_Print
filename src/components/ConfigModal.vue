@@ -1,5 +1,5 @@
 ﻿<script setup lang="ts">
-import { reactive, watch } from 'vue'
+import { reactive, ref, watch } from 'vue'
 import type { AppConfig } from '../types/mes'
 
 const props = defineProps<{
@@ -14,6 +14,8 @@ const emit = defineEmits<{
 }>()
 
 const form = reactive<AppConfig>({ ...props.modelValue })
+type PrintPathField = 'barTenderTemplatePath1' | 'barTenderTemplatePath2' | 'barTenderDatabasePath1' | 'barTenderDatabasePath2'
+const selectingField = ref<PrintPathField | ''>('')
 
 watch(
   () => props.visible,
@@ -23,7 +25,11 @@ watch(
 )
 
 function handleSave() {
-  emit('update:modelValue', { ...form })
+  emit('update:modelValue', {
+    ...form,
+    barTenderTemplatePath: form.barTenderTemplatePath1,
+    barTenderDatabasePath: form.barTenderDatabasePath1
+  })
   emit('save')
   emit('update:visible', false)
 }
@@ -31,6 +37,38 @@ function handleSave() {
 function handleCancel() {
   Object.assign(form, props.modelValue)
   emit('update:visible', false)
+}
+
+async function pickPath(field: PrintPathField, target: 'template' | 'database') {
+  if (selectingField.value) return
+
+  selectingField.value = field
+  try {
+    const response = await fetch('http://127.0.0.1:5246/pathPicker/select', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Accept: 'application/json'
+      },
+      body: JSON.stringify({ target })
+    })
+
+    if (!response.ok) {
+      throw new Error(`HTTP ${response.status}`)
+    }
+
+    const data = (await response.json()) as { success?: boolean; cancelled?: boolean; path?: string; message?: string }
+    if (data.cancelled) return
+    if (!data.success || !data.path) {
+      throw new Error(data.message || '未返回路径')
+    }
+
+    form[field] = String(data.path).trim().replace(/\//g, '\\')
+  } catch (err: any) {
+    alert(`选择路径失败: ${err?.message || String(err)}`)
+  } finally {
+    selectingField.value = ''
+  }
 }
 </script>
 
@@ -125,12 +163,40 @@ function handleCancel() {
               <input v-model="form.barTenderExePath" type="text" class="input-field" />
             </div>
             <div class="field-group">
-              <label>模板路径 (.btw)</label>
-              <input v-model="form.barTenderTemplatePath" type="text" class="input-field" />
+              <label>模板路径 1 (.btw)</label>
+              <div class="path-row">
+                <input v-model="form.barTenderTemplatePath1" type="text" class="input-field" />
+                <button class="path-btn" :disabled="!!selectingField" @click="pickPath('barTenderTemplatePath1', 'template')">
+                  {{ selectingField === 'barTenderTemplatePath1' ? '选择中...' : '选择' }}
+                </button>
+              </div>
             </div>
             <div class="field-group">
-              <label>数据库路径 (CSV/文本)</label>
-              <input v-model="form.barTenderDatabasePath" type="text" class="input-field" />
+              <label>模板路径 2 (.btw)</label>
+              <div class="path-row">
+                <input v-model="form.barTenderTemplatePath2" type="text" class="input-field" />
+                <button class="path-btn" :disabled="!!selectingField" @click="pickPath('barTenderTemplatePath2', 'template')">
+                  {{ selectingField === 'barTenderTemplatePath2' ? '选择中...' : '选择' }}
+                </button>
+              </div>
+            </div>
+            <div class="field-group">
+              <label>数据库路径 1 (CSV/文本)</label>
+              <div class="path-row">
+                <input v-model="form.barTenderDatabasePath1" type="text" class="input-field" />
+                <button class="path-btn" :disabled="!!selectingField" @click="pickPath('barTenderDatabasePath1', 'database')">
+                  {{ selectingField === 'barTenderDatabasePath1' ? '选择中...' : '选择' }}
+                </button>
+              </div>
+            </div>
+            <div class="field-group">
+              <label>数据库路径 2 (CSV/文本)</label>
+              <div class="path-row">
+                <input v-model="form.barTenderDatabasePath2" type="text" class="input-field" />
+                <button class="path-btn" :disabled="!!selectingField" @click="pickPath('barTenderDatabasePath2', 'database')">
+                  {{ selectingField === 'barTenderDatabasePath2' ? '选择中...' : '选择' }}
+                </button>
+              </div>
             </div>
           </section>
 
@@ -265,6 +331,31 @@ function handleCancel() {
 .input-field:focus {
   border-color: #42a5f5;
   box-shadow: 0 0 0 3px rgba(66, 165, 245, 0.15);
+}
+
+.path-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.path-row .input-field {
+  flex: 1;
+}
+
+.path-btn {
+  height: 40px;
+  min-width: 78px;
+  border-radius: 6px;
+  border: 1px solid rgba(100, 181, 246, 0.3);
+  background: rgba(21, 101, 192, 0.18);
+  color: #e3f2fd;
+  cursor: pointer;
+}
+
+.path-btn:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
 }
 
 .field-groups-row {

@@ -1,0 +1,3 @@
+﻿Code,CodeType,CodeTypeName
+DJ2530-G4M-0019225,S,电池系统
+03HPB0KJ0001FDG4M0000007,P,电池包

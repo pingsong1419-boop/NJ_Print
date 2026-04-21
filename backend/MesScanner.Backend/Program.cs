@@ -1,8 +1,8 @@
-﻿using System.Collections.Concurrent;
+using System.Collections.Concurrent;
 using System.Diagnostics;
-using System.Net.Sockets;
 using System.Text;
 using System.Text.Json;
+using ScanModule;
 
 var builder = WebApplication.CreateBuilder(args);
 var fileJsonOptions = new JsonSerializerOptions
@@ -23,16 +23,44 @@ builder.Services.AddCors(options =>
     });
 });
 
-var scannerRuntime = new BarcodeScannerRuntime();
+builder.Services.AddBarcodeScannerModule();
 
 var app = builder.Build();
-
-app.Lifetime.ApplicationStopping.Register(() =>
-{
-    scannerRuntime.Stop();
-});
+var interactionLogThrottler = new InteractionLogThrottler();
 
 app.UseCors("AllowAll");
+app.Use(async (context, next) =>
+{
+    var stopwatch = Stopwatch.StartNew();
+    string requestBody = string.Empty;
+
+    if (context.Request.ContentLength > 0 &&
+        (HttpMethods.IsPost(context.Request.Method) ||
+         HttpMethods.IsPut(context.Request.Method) ||
+         HttpMethods.IsPatch(context.Request.Method)))
+    {
+        context.Request.EnableBuffering();
+        using var reader = new StreamReader(context.Request.Body, Encoding.UTF8, detectEncodingFromByteOrderMarks: false, leaveOpen: true);
+        requestBody = await reader.ReadToEndAsync();
+        context.Request.Body.Position = 0;
+    }
+
+    await next();
+    stopwatch.Stop();
+
+    if (ShouldLogInteraction(context.Request.Path))
+    {
+        var key = $"{context.Request.Method}:{context.Request.Path}";
+        var intervalMs = GetInteractionLogIntervalMs(context.Request.Path);
+        if (interactionLogThrottler.ShouldWrite(key, intervalMs, out var skippedCount))
+        {
+            var bodyText = string.IsNullOrWhiteSpace(requestBody) ? "{}" : ClipForLog(requestBody, 600);
+            var skippedText = skippedCount > 0 ? $" | Skipped={skippedCount}" : string.Empty;
+            Console.WriteLine(
+                $"[API交互] {context.Request.Method} {context.Request.Path}{context.Request.QueryString} | Status={context.Response.StatusCode} | Cost={stopwatch.ElapsedMilliseconds}ms{skippedText} | Body={bodyText}");
+        }
+    }
+});
 
 app.MapGet("/", () => "PACK Material Station Backend Running...");
 
@@ -40,19 +68,117 @@ app.MapPost("/saveLogs", async (LogSaveRequest req) =>
 {
     try
     {
-        var savePath = string.IsNullOrWhiteSpace(req.Path) ? "C:\\NJ_Material_Logs" : req.Path;
+        var savePath = ResolveConfigDirectoryPath(req.Path, "Logs");
         if (!Directory.Exists(savePath))
         {
             Directory.CreateDirectory(savePath);
         }
 
-        var fullPath = Path.Combine(savePath, req.FileName);
+        var fileName = string.IsNullOrWhiteSpace(req.FileName)
+            ? $"scan_log_{DateTime.Now:yyyyMMdd_HHmmss}.log"
+            : req.FileName;
+        var fullPath = Path.Combine(savePath, fileName);
         await File.WriteAllTextAsync(fullPath, req.Content);
         return Results.Ok(new { message = "Save success", path = fullPath });
     }
     catch (Exception ex)
     {
         return Results.Problem(ex.Message);
+    }
+});
+
+app.MapPost("/pathPicker/select", (PathPickerRequest req) =>
+{
+    try
+    {
+        if (string.IsNullOrWhiteSpace(req.Target))
+        {
+            return Results.BadRequest(new { success = false, message = "target is required" });
+        }
+
+        var selectedPath = SelectPathByTarget(req.Target.Trim());
+        if (string.IsNullOrWhiteSpace(selectedPath))
+        {
+            return Results.Ok(new { success = false, cancelled = true, path = "" });
+        }
+
+        return Results.Ok(new { success = true, cancelled = false, path = selectedPath });
+    }
+    catch (Exception ex)
+    {
+        return Results.Ok(new { success = false, cancelled = false, path = "", message = $"路径选择失败: {ex.Message}" });
+    }
+});
+
+app.MapGet("/appConfig", async () =>
+{
+    try
+    {
+        var configFile = GetAppConfigFilePath();
+        if (!File.Exists(configFile))
+        {
+            return Results.Json(new { exists = false });
+        }
+
+        var content = await File.ReadAllTextAsync(configFile);
+        if (string.IsNullOrWhiteSpace(content))
+        {
+            return Results.Json(new { exists = false });
+        }
+
+        using var doc = JsonDocument.Parse(content);
+        var root = doc.RootElement.Clone();
+        return Results.Json(root);
+    }
+    catch (Exception ex)
+    {
+        return Results.Problem(ex.Message);
+    }
+});
+
+app.MapPost("/appConfig", async (JsonElement req) =>
+{
+    try
+    {
+        var configFile = GetAppConfigFilePath();
+        var directory = Path.GetDirectoryName(configFile)!;
+        if (!Directory.Exists(directory))
+        {
+            Directory.CreateDirectory(directory);
+        }
+
+        var json = req.GetRawText();
+        await File.WriteAllTextAsync(configFile, json);
+        return Results.Ok(new { message = "App config saved", path = configFile });
+    }
+    catch (Exception ex)
+    {
+        return Results.Problem(ex.Message);
+    }
+});
+
+app.MapGet("/printers", () =>
+{
+    try
+    {
+        var printers = GetInstalledPrinters();
+        var defaultPrinter = printers.FirstOrDefault(x => x.IsDefault)?.Name ?? string.Empty;
+        return Results.Ok(new
+        {
+            success = true,
+            defaultPrinter,
+            printers
+        });
+    }
+    catch (Exception ex)
+    {
+        return Results.Ok(new
+        {
+            success = false,
+            defaultPrinter = string.Empty,
+            printers = Array.Empty<object>(),
+            message = $"读取打印机列表失败: {ex.Message}"
+        });
     }
 });
 
@@ -135,50 +261,21 @@ app.MapPost("/orderStatusSelection", async (OrderStatusSelectionState req) =>
     }
 });
 
-app.MapPost("/barcodeScanner/start", (BarcodeScannerStartRequest req) =>
-{
-    if (string.IsNullOrWhiteSpace(req.ScannerIp) || req.ScannerPort <= 0)
-    {
-        return Results.BadRequest(new { running = false, connected = false, message = "扫码枪IP或端口无效" });
-    }
-
-    var result = scannerRuntime.Start(req);
-    return Results.Ok(result);
-});
-
-app.MapPost("/barcodeScanner/stop", () =>
-{
-    var result = scannerRuntime.Stop();
-    return Results.Ok(result);
-});
-
-app.MapGet("/barcodeScanner/status", () => Results.Ok(scannerRuntime.GetStatus()));
-
-app.MapGet("/barcodeScanner/pull", (long afterId) =>
-{
-    var result = scannerRuntime.Pull(afterId);
-    return Results.Ok(result);
-});
+app.MapBarcodeScannerModule();
 
 app.MapPost("/printLabelsByBarTender", async (PrintByBarTenderRequest req) =>
 {
     try
     {
         if (string.IsNullOrWhiteSpace(req.BarTenderExePath) ||
-            string.IsNullOrWhiteSpace(req.TemplatePath) ||
-            string.IsNullOrWhiteSpace(req.DatabasePath))
+            string.IsNullOrWhiteSpace(req.TemplatePath))
         {
-            return Results.BadRequest(new { success = false, message = "BarTender配置不完整，请检查EXE/模板/数据库路径" });
-        }
-
-        if (req.Labels is null || req.Labels.Count == 0)
-        {
-            return Results.BadRequest(new { success = false, message = "无可打印条码" });
+            return Results.BadRequest(new { success = false, message = "BarTender配置不完整，请检查EXE/模板路径" });
         }
 
         if (!File.Exists(req.BarTenderExePath))
         {
-            return Results.BadRequest(new { success = false, message = $"BarTender程序不存在: {req.BarTenderExePath}" });
+            return Results.BadRequest(new { success = false, message = $"BarTender 程序不存在: {req.BarTenderExePath}" });
         }
 
         if (!File.Exists(req.TemplatePath))
@@ -186,28 +283,57 @@ app.MapPost("/printLabelsByBarTender", async (PrintByBarTenderRequest req) =>
             return Results.BadRequest(new { success = false, message = $"模板文件不存在: {req.TemplatePath}" });
         }
 
-        var validLabels = req.Labels.Where(x => !string.IsNullOrWhiteSpace(x.Code)).ToList();
-        if (validLabels.Count == 0)
+        var validLabels = (req.Labels ?? new List<PrintLabelItem>())
+            .Where(x => !string.IsNullOrWhiteSpace(x.Code))
+            .ToList();
+
+        string? dataFilePath = null;
+        string barTenderArgs;
+        if (validLabels.Count > 0)
         {
-            return Results.BadRequest(new { success = false, message = "条码列表为空或无有效条码" });
+            var databasePath = ResolveConfigFilePath(req.DatabasePath, "pack_labels.csv");
+            var dataDir = Path.GetDirectoryName(databasePath);
+            if (!string.IsNullOrWhiteSpace(dataDir) && !Directory.Exists(dataDir))
+            {
+                Directory.CreateDirectory(dataDir);
+            }
+
+            string content;
+            if (databasePath.EndsWith(".txt", StringComparison.OrdinalIgnoreCase))
+            {
+                // 如果是 .txt 后缀，仅写入纯条码（不含表头），多条码换行分隔
+                content = string.Join(Environment.NewLine, validLabels.Select(x => x.Code));
+            }
+            else
+            {
+                // 默认 CSV 格式（包含表头）
+                var lines = new List<string> { "Code,CodeType,CodeTypeName" };
+                lines.AddRange(validLabels.Select(x => $"{EscapeCsv(x.Code)},{EscapeCsv(x.Type)},{EscapeCsv(x.TypeName)}"));
+                content = string.Join(Environment.NewLine, lines);
+            }
+
+            await File.WriteAllTextAsync(databasePath, content, new UTF8Encoding(encoderShouldEmitUTF8Identifier: true));
+            dataFilePath = databasePath;
+            barTenderArgs = $"/F=\"{req.TemplatePath}\" /D=\"{databasePath}\" /P /X";
+        }
+        else
+        {
+            // 兼容“仅通过模板内固定文本文件驱动”的打印模式（无需数据库CSV）
+            barTenderArgs = $"/F=\"{req.TemplatePath}\" /P /X";
         }
 
-        var dataDir = Path.GetDirectoryName(req.DatabasePath);
-        if (!string.IsNullOrWhiteSpace(dataDir) && !Directory.Exists(dataDir))
+        var printerName = string.IsNullOrWhiteSpace(req.PrinterName)
+            ? GetDefaultPrinterName()
+            : req.PrinterName.Trim();
+        if (!string.IsNullOrWhiteSpace(printerName))
         {
-            Directory.CreateDirectory(dataDir);
+            barTenderArgs = $"{barTenderArgs} /PRN=\"{printerName}\"";
         }
 
-        var lines = new List<string> { "Code,CodeType,CodeTypeName" };
-        lines.AddRange(validLabels.Select(x => $"{EscapeCsv(x.Code)},{EscapeCsv(x.Type)},{EscapeCsv(x.TypeName)}"));
-        await File.WriteAllLinesAsync(req.DatabasePath, lines, new UTF8Encoding(encoderShouldEmitUTF8Identifier: true));
-
-        var barTenderArgs = $"/F=\"{req.TemplatePath}\" /D=\"{req.DatabasePath}\" /P /X";
-        var cmdCommand = $"\"{req.BarTenderExePath}\" {barTenderArgs}";
         var psi = new ProcessStartInfo
         {
-            FileName = "cmd.exe",
-            Arguments = $"/c {cmdCommand}",
+            FileName = req.BarTenderExePath,
+            Arguments = barTenderArgs,
             UseShellExecute = false,
             RedirectStandardOutput = true,
             RedirectStandardError = true,
@@ -221,9 +347,10 @@ app.MapPost("/printLabelsByBarTender", async (PrintByBarTenderRequest req) =>
             return Results.Ok(new
             {
                 success = false,
-                message = "BarTender进程启动失败",
+                message = "BarTender 进程启动失败",
                 command = $"{psi.FileName} {psi.Arguments}",
-                dataFilePath = req.DatabasePath
+                dataFilePath,
+                printerUsed = printerName
             });
         }
 
@@ -238,9 +365,10 @@ app.MapPost("/printLabelsByBarTender", async (PrintByBarTenderRequest req) =>
             return Results.Ok(new
             {
                 success = false,
-                message = "BarTender执行超时(120s)",
+                message = "BarTender 执行超时(120s)",
                 command = $"{psi.FileName} {psi.Arguments}",
-                dataFilePath = req.DatabasePath
+                dataFilePath,
+                printerUsed = printerName
             });
         }
 
@@ -248,30 +376,35 @@ app.MapPost("/printLabelsByBarTender", async (PrintByBarTenderRequest req) =>
         var stderr = await process.StandardError.ReadToEndAsync();
         if (process.ExitCode != 0)
         {
+            var rawError = string.IsNullOrWhiteSpace(stderr) ? stdout : stderr;
+            var knownError = TryMapBarTenderKnownError(rawError, req.TemplatePath);
             return Results.Ok(new
             {
                 success = false,
-                message = string.IsNullOrWhiteSpace(stderr) ? "BarTender执行失败" : stderr.Trim(),
+                message = knownError ?? (string.IsNullOrWhiteSpace(rawError) ? "BarTender 执行失败" : rawError.Trim()),
                 exitCode = process.ExitCode,
                 command = $"{psi.FileName} {psi.Arguments}",
                 output = stdout,
-                dataFilePath = req.DatabasePath
+                rawError = string.IsNullOrWhiteSpace(rawError) ? string.Empty : ClipForLog(rawError, 800),
+                dataFilePath,
+                printerUsed = printerName
             });
         }
 
         return Results.Ok(new
         {
             success = true,
-            message = "BarTender打印完成",
+            message = "BarTender 打印命令已执行（已提交到打印队列）",
             exitCode = process.ExitCode,
             command = $"{psi.FileName} {psi.Arguments}",
             output = stdout,
-            dataFilePath = req.DatabasePath
+            dataFilePath,
+            printerUsed = printerName
         });
     }
     catch (Exception ex)
     {
-        return Results.Ok(new { success = false, message = $"BarTender调用异常: {ex.Message}" });
+        return Results.Ok(new { success = false, message = $"BarTender 调用异常: {ex.Message}" });
     }
 });
 
@@ -279,7 +412,299 @@ app.Run();
 
 static string GetOrderStatusStateFilePath()
 {
-    return Path.Combine("C:\\NJ_Material_Logs", "order_status_selection.json");
+    return Path.Combine(GetConfigDirectoryPath(), "order_status_selection.json");
+}
+
+static string GetAppConfigFilePath()
+{
+    return Path.Combine(GetConfigDirectoryPath(), "app_config.json");
+}
+
+static string GetConfigDirectoryPath()
+{
+    var projectRoot = ResolveProjectRootPath();
+    var configPath = Path.Combine(projectRoot, "Config");
+    Directory.CreateDirectory(configPath);
+    return configPath;
+}
+
+static string SelectPathByTarget(string target)
+{
+    var normalized = string.IsNullOrWhiteSpace(target)
+        ? string.Empty
+        : target.Trim().ToLowerInvariant();
+
+    return normalized switch
+    {
+        "bartenderexe" or "bartender_exe" or "bartender-exe" =>
+            ExecutePowerShellPathDialog(BuildOpenFileDialogScript(
+                "选择 BarTender EXE 文件",
+                "应用程序 (*.exe)|*.exe|所有文件 (*.*)|*.*")),
+
+        "template" or "templatepath" or "template_path" or "template-btw" =>
+            ExecutePowerShellPathDialog(BuildOpenFileDialogScript(
+                "选择 BarTender 模板文件",
+                "BarTender 模板 (*.btw)|*.btw|所有文件 (*.*)|*.*")),
+
+        "database" or "databasepath" or "database_path" =>
+            ExecutePowerShellPathDialog(BuildSaveFileDialogScript(
+                "选择数据库文件路径",
+                "CSV 文件 (*.csv)|*.csv|文本文件 (*.txt)|*.txt|所有文件 (*.*)|*.*",
+                "pack_labels.csv")),
+
+        "qrfile" or "qrfilepath" or "qr_file" or "qr_file_path" =>
+            ExecutePowerShellPathDialog(BuildSaveFileDialogScript(
+                "选择二维码文件路径",
+                "文本文件 (*.txt)|*.txt|所有文件 (*.*)|*.*",
+                "二维码.txt")),
+
+        "barfile" or "barfilepath" or "bar_file" or "bar_file_path" =>
+            ExecutePowerShellPathDialog(BuildSaveFileDialogScript(
+                "选择一维码文件路径",
+                "文本文件 (*.txt)|*.txt|所有文件 (*.*)|*.*",
+                "一维码.txt")),
+
+        "folder" or "directory" or "logpath" or "logsavepath" =>
+            ExecutePowerShellPathDialog(BuildFolderDialogScript("选择文件夹")),
+
+        _ => ExecutePowerShellPathDialog(BuildOpenFileDialogScript(
+            "选择路径",
+            "所有文件 (*.*)|*.*"))
+    };
+}
+
+static string ResolveProjectRootPath()
+{
+    var probePaths = new[] { Directory.GetCurrentDirectory(), AppContext.BaseDirectory };
+    foreach (var path in probePaths)
+    {
+        var dir = new DirectoryInfo(path);
+        for (var i = 0; i < 8 && dir is not null; i++)
+        {
+            if (File.Exists(Path.Combine(dir.FullName, "package.json")) &&
+                Directory.Exists(Path.Combine(dir.FullName, "backend")))
+            {
+                return dir.FullName;
+            }
+            dir = dir.Parent;
+        }
+    }
+
+    return Directory.GetCurrentDirectory();
+}
+
+static List<PrinterInfo> GetInstalledPrinters()
+{
+    var script =
+        "$ErrorActionPreference = 'Stop'\n" +
+        "$list = Get-CimInstance Win32_Printer | Select-Object " +
+        "@{n='Name';e={$_.Name}}," +
+        "@{n='Default';e={[bool]$_.Default}}," +
+        "@{n='WorkOffline';e={[bool]$_.WorkOffline}}," +
+        "@{n='PrinterStatus';e={$_.PrinterStatus}}\n" +
+        "$list | ConvertTo-Json -Compress";
+
+    var json = ExecutePowerShellScript(script);
+    if (string.IsNullOrWhiteSpace(json))
+    {
+        return new List<PrinterInfo>();
+    }
+
+    using var doc = JsonDocument.Parse(json);
+    var result = new List<PrinterInfo>();
+
+    if (doc.RootElement.ValueKind == JsonValueKind.Array)
+    {
+        foreach (var element in doc.RootElement.EnumerateArray())
+        {
+            result.Add(ParsePrinterInfo(element));
+        }
+        return result;
+    }
+
+    if (doc.RootElement.ValueKind == JsonValueKind.Object)
+    {
+        result.Add(ParsePrinterInfo(doc.RootElement));
+    }
+
+    return result;
+}
+
+static string GetDefaultPrinterName()
+{
+    return GetInstalledPrinters().FirstOrDefault(x => x.IsDefault)?.Name ?? string.Empty;
+}
+
+static PrinterInfo ParsePrinterInfo(JsonElement element)
+{
+    var name = element.TryGetProperty("Name", out var nameEl) ? nameEl.GetString() ?? string.Empty : string.Empty;
+    var isDefault = element.TryGetProperty("Default", out var defaultEl) && defaultEl.ValueKind == JsonValueKind.True;
+    var workOffline = element.TryGetProperty("WorkOffline", out var offlineEl) && offlineEl.ValueKind == JsonValueKind.True;
+    var printerStatus = string.Empty;
+    if (element.TryGetProperty("PrinterStatus", out var statusEl))
+    {
+        if (statusEl.ValueKind == JsonValueKind.String) printerStatus = statusEl.GetString() ?? string.Empty;
+        else if (statusEl.ValueKind == JsonValueKind.Number) printerStatus = statusEl.GetRawText();
+    }
+
+    return new PrinterInfo(name, isDefault, workOffline, printerStatus);
+}
+
+static string ExecutePowerShellScript(string script)
+{
+    var encoded = Convert.ToBase64String(Encoding.Unicode.GetBytes(script));
+    var psi = new ProcessStartInfo
+    {
+        FileName = "powershell",
+        Arguments = $"-NoProfile -ExecutionPolicy Bypass -EncodedCommand {encoded}",
+        UseShellExecute = false,
+        RedirectStandardOutput = true,
+        RedirectStandardError = true,
+        CreateNoWindow = true
+    };
+
+    using var process = Process.Start(psi);
+    if (process is null)
+    {
+        throw new InvalidOperationException("无法启动 PowerShell");
+    }
+
+    process.WaitForExit(60000);
+    var stdout = process.StandardOutput.ReadToEnd();
+    var stderr = process.StandardError.ReadToEnd();
+
+    if (process.ExitCode != 0)
+    {
+        throw new InvalidOperationException(string.IsNullOrWhiteSpace(stderr) ? $"PowerShell ExitCode={process.ExitCode}" : stderr.Trim());
+    }
+
+    return stdout.Trim();
+}
+
+static string ExecutePowerShellPathDialog(string script)
+{
+    var encoded = Convert.ToBase64String(Encoding.Unicode.GetBytes(script));
+    var psi = new ProcessStartInfo
+    {
+        FileName = "powershell",
+        Arguments = $"-NoProfile -STA -ExecutionPolicy Bypass -EncodedCommand {encoded}",
+        UseShellExecute = false,
+        RedirectStandardOutput = true,
+        RedirectStandardError = true,
+        CreateNoWindow = true
+    };
+
+    using var process = Process.Start(psi);
+    if (process is null)
+    {
+        throw new InvalidOperationException("无法启动 PowerShell 选择窗口");
+    }
+
+    process.WaitForExit(120000);
+    var stdout = process.StandardOutput.ReadToEnd();
+    var stderr = process.StandardError.ReadToEnd();
+
+    if (process.ExitCode != 0)
+    {
+        var errMsg = string.IsNullOrWhiteSpace(stderr) ? $"PowerShell ExitCode={process.ExitCode}" : stderr.Trim();
+        throw new InvalidOperationException(errMsg);
+    }
+
+    var lines = stdout
+        .Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries)
+        .Select(x => x.Trim())
+        .Where(x => !string.IsNullOrWhiteSpace(x))
+        .ToArray();
+    if (lines.Length == 0) return string.Empty;
+    return lines[^1];
+}
+
+static string BuildOpenFileDialogScript(string title, string filter)
+{
+    return
+        "$ErrorActionPreference = 'Stop'\n" +
+        "Add-Type -AssemblyName System.Windows.Forms\n" +
+        "[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)\n" +
+        "$dlg = New-Object System.Windows.Forms.OpenFileDialog\n" +
+        $"$dlg.Title = '{EscapePowerShellSingleQuoted(title)}'\n" +
+        $"$dlg.Filter = '{EscapePowerShellSingleQuoted(filter)}'\n" +
+        "$dlg.Multiselect = $false\n" +
+        "$dlg.CheckFileExists = $true\n" +
+        "$dlg.CheckPathExists = $true\n" +
+        "if ($dlg.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) { Write-Output $dlg.FileName }";
+}
+
+static string BuildSaveFileDialogScript(string title, string filter, string fileName)
+{
+    return
+        "$ErrorActionPreference = 'Stop'\n" +
+        "Add-Type -AssemblyName System.Windows.Forms\n" +
+        "[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)\n" +
+        "$dlg = New-Object System.Windows.Forms.SaveFileDialog\n" +
+        $"$dlg.Title = '{EscapePowerShellSingleQuoted(title)}'\n" +
+        $"$dlg.Filter = '{EscapePowerShellSingleQuoted(filter)}'\n" +
+        $"$dlg.FileName = '{EscapePowerShellSingleQuoted(fileName)}'\n" +
+        "$dlg.OverwritePrompt = $false\n" +
+        "$dlg.CheckPathExists = $true\n" +
+        "$dlg.AddExtension = $true\n" +
+        "if ($dlg.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) { Write-Output $dlg.FileName }";
+}
+
+static string BuildFolderDialogScript(string title)
+{
+    return
+        "$ErrorActionPreference = 'Stop'\n" +
+        "Add-Type -AssemblyName System.Windows.Forms\n" +
+        "[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)\n" +
+        "$dlg = New-Object System.Windows.Forms.FolderBrowserDialog\n" +
+        $"$dlg.Description = '{EscapePowerShellSingleQuoted(title)}'\n" +
+        "$dlg.UseDescriptionForTitle = $true\n" +
+        "if ($dlg.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) { Write-Output $dlg.SelectedPath }";
+}
+
+static string EscapePowerShellSingleQuoted(string value)
+{
+    return (value ?? string.Empty).Replace("'", "''");
+}
+
+static string ResolveConfigDirectoryPath(string? requestedPath, string defaultSubDirectory)
+{
+    var configRoot = GetConfigDirectoryPath();
+    if (string.IsNullOrWhiteSpace(requestedPath))
+    {
+        return EnsureDirectory(Path.Combine(configRoot, defaultSubDirectory));
+    }
+
+    var rawPath = requestedPath.Trim();
+    if (Path.IsPathRooted(rawPath))
+    {
+        return EnsureDirectory(rawPath);
+    }
+
+    return EnsureDirectory(Path.Combine(configRoot, rawPath));
+}
+
+static string ResolveConfigFilePath(string? requestedPath, string defaultFileName)
+{
+    var configRoot = GetConfigDirectoryPath();
+    if (string.IsNullOrWhiteSpace(requestedPath))
+    {
+        return Path.Combine(configRoot, defaultFileName);
+    }
+
+    var rawPath = requestedPath.Trim();
+    if (Path.IsPathRooted(rawPath))
+    {
+        return rawPath;
+    }
+
+    return Path.Combine(configRoot, rawPath);
+}
+
+static string EnsureDirectory(string path)
+{
+    Directory.CreateDirectory(path);
+    return path;
 }
 
 static string? ReadStringOrNumber(JsonElement root, string propertyName)
@@ -307,342 +732,83 @@ static string EscapeCsv(string value)
     return value;
 }
 
-public record LogSaveRequest(string FileName, string Content, string Path);
-public record OrderStatusSelectionState(string SelectedCode, string OrderStatus, string UpdatedAt);
-public record PrintByBarTenderRequest(string BarTenderExePath, string TemplatePath, string DatabasePath, List<PrintLabelItem> Labels);
-public record PrintLabelItem(string Code, string Type, string TypeName);
-public record BarcodeScannerStartRequest(string ScannerIp, int ScannerPort, string BarcodeRegex);
-public record BarcodeScanEvent(long Id, string Code, string Time);
-
-public class BarcodeScannerRuntime
+static bool ShouldLogInteraction(PathString path)
 {
-    private const int WelcomeBytesLength = 100;
-    private const int BarcodeBytesLength = 30;
-    private readonly object _sync = new();
-    private readonly ConcurrentQueue<BarcodeScanEvent> _events = new();
-    private readonly ConcurrentQueue<string> _ioLogs = new();
-    private CancellationTokenSource? _cts;
-    private Task? _worker;
-    private BarcodeScannerStartRequest? _config;
-    private long _lastId;
-    private bool _running;
-    private bool _connected;
-    private string _lastError = string.Empty;
+    return path.StartsWithSegments("/barcodeScanner", StringComparison.OrdinalIgnoreCase) ||
+           path.StartsWithSegments("/saveLogs", StringComparison.OrdinalIgnoreCase) ||
+           path.StartsWithSegments("/pathPicker", StringComparison.OrdinalIgnoreCase) ||
+           path.StartsWithSegments("/printers", StringComparison.OrdinalIgnoreCase) ||
+           path.StartsWithSegments("/appConfig", StringComparison.OrdinalIgnoreCase) ||
+           path.StartsWithSegments("/orderStatusSelection", StringComparison.OrdinalIgnoreCase) ||
+           path.StartsWithSegments("/printLabelsByBarTender", StringComparison.OrdinalIgnoreCase);
+}
 
-    public object Start(BarcodeScannerStartRequest cfg)
+static int GetInteractionLogIntervalMs(PathString path)
+{
+    if (path.StartsWithSegments("/barcodeScanner/pull", StringComparison.OrdinalIgnoreCase)) return 3000;
+    if (path.StartsWithSegments("/barcodeScanner/status", StringComparison.OrdinalIgnoreCase)) return 3000;
+    if (path.StartsWithSegments("/barcodeScanner", StringComparison.OrdinalIgnoreCase)) return 1000;
+    return 0;
+}
+
+static string ClipForLog(string text, int limit)
+{
+    if (string.IsNullOrEmpty(text)) return string.Empty;
+    if (text.Length <= limit) return text;
+    return $"{text[..limit]}...(truncated)";
+}
+
+static string? TryMapBarTenderKnownError(string? errorText, string templatePath)
+{
+    if (string.IsNullOrWhiteSpace(errorText)) return null;
+    var text = errorText.Trim();
+
+    if (text.Contains("#3600", StringComparison.OrdinalIgnoreCase) ||
+        text.Contains("未引用任何数据库字段", StringComparison.OrdinalIgnoreCase) ||
+        text.Contains("did not reference any database fields", StringComparison.OrdinalIgnoreCase))
     {
-        lock (_sync)
-        {
-            StopInternal();
-            ClearScannerBuffersUnsafe();
-            _config = cfg;
-            _cts = new CancellationTokenSource();
-            _running = true;
-            _connected = false;
-            _lastError = string.Empty;
-            _worker = Task.Run(() => RunLoop(_cts.Token));
-            return GetStatusUnsafe();
-        }
+        return $"BarTender 模板错误(#3600)：模板未绑定数据库字段。请在模板 {templatePath} 中将条码对象的数据源改为数据库字段（Code/CodeType/CodeTypeName）后重试。";
     }
 
-    public object Stop()
+    return null;
+}
+
+public sealed class InteractionLogThrottler
+{
+    private readonly ConcurrentDictionary<string, long> _lastLoggedAtMs = new();
+    private readonly ConcurrentDictionary<string, int> _skippedCount = new();
+
+    public bool ShouldWrite(string key, int intervalMs, out int skippedCount)
     {
-        lock (_sync)
+        skippedCount = 0;
+        if (intervalMs <= 0) return true;
+
+        var nowMs = Environment.TickCount64;
+        while (true)
         {
-            StopInternal();
-            return GetStatusUnsafe();
-        }
-    }
-
-    public object GetStatus()
-    {
-        lock (_sync)
-        {
-            return GetStatusUnsafe();
-        }
-    }
-
-    public object Pull(long afterId)
-    {
-        BarcodeScanEvent[] all;
-        bool running;
-        bool connected;
-        string scannerIp;
-        int scannerPort;
-        string barcodeRegex;
-        string lastError;
-        lock (_sync)
-        {
-            all = _events.ToArray();
-            running = _running;
-            connected = _connected;
-            scannerIp = _config?.ScannerIp ?? string.Empty;
-            scannerPort = _config?.ScannerPort ?? 0;
-            barcodeRegex = _config?.BarcodeRegex ?? string.Empty;
-            lastError = _lastError;
-        }
-
-        var events = all.Where(x => x.Id > afterId)
-                        .OrderBy(x => x.Id)
-                        .Take(100)
-                        .ToList();
-
-        TrimQueueIfNeeded();
-
-        return new
-        {
-            running,
-            connected,
-            scannerIp,
-            scannerPort,
-            barcodeRegex,
-            lastError,
-            ioLogs = _ioLogs.ToArray().TakeLast(30).ToArray(),
-            events
-        };
-    }
-
-    private void StopInternal()
-    {
-        try { _cts?.Cancel(); } catch { }
-        _running = false;
-        _connected = false;
-    }
-
-    private void ClearScannerBuffersUnsafe()
-    {
-        while (_events.TryDequeue(out _))
-        {
-        }
-        while (_ioLogs.TryDequeue(out _))
-        {
-        }
-        Interlocked.Exchange(ref _lastId, 0);
-    }
-
-    private object GetStatusUnsafe()
-    {
-        return new
-        {
-            running = _running,
-            connected = _connected,
-            scannerIp = _config?.ScannerIp ?? string.Empty,
-            scannerPort = _config?.ScannerPort ?? 0,
-            barcodeRegex = _config?.BarcodeRegex ?? string.Empty,
-            lastError = _lastError,
-            ioLogs = _ioLogs.ToArray().TakeLast(30).ToArray()
-        };
-    }
-
-    private async Task RunLoop(CancellationToken ct)
-    {
-        while (!ct.IsCancellationRequested)
-        {
-            BarcodeScannerStartRequest? cfg;
-            lock (_sync)
+            var lastMs = _lastLoggedAtMs.GetOrAdd(key, 0);
+            if (nowMs - lastMs >= intervalMs)
             {
-                cfg = _config;
-            }
+                if (_lastLoggedAtMs.TryUpdate(key, nowMs, lastMs))
+                {
+                    _skippedCount.TryRemove(key, out skippedCount);
+                    return true;
+                }
 
-            if (cfg is null)
-            {
-                await Task.Delay(1000, ct);
                 continue;
             }
 
-            try
-            {
-                using var client = new System.Net.Sockets.TcpClient();
-                using var connectCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
-                connectCts.CancelAfter(5000);
-                await client.ConnectAsync(cfg.ScannerIp, cfg.ScannerPort, connectCts.Token);
-                LogIo($"TX CONNECT {cfg.ScannerIp}:{cfg.ScannerPort}");
-
-                using var stream = client.GetStream();
-                var welcomeBytes = await ReadWelcomeHandshakeAsync(stream, ct);
-                if (welcomeBytes.Length > 0)
-                {
-                    var welcomeText = NormalizeBarcode(Encoding.ASCII.GetString(welcomeBytes));
-                    LogIo($"RX WELCOME({welcomeBytes.Length}): {welcomeText}");
-                    if (IsScannerBusyMessage(welcomeText))
-                    {
-                        lock (_sync)
-                        {
-                            _connected = false;
-                            _lastError = $"扫码枪通道占用: {welcomeText}";
-                        }
-                        LogIo("RX ERROR: 扫码枪通道被占用，1秒后重试");
-                        await Task.Delay(1000, ct);
-                        continue;
-                    }
-                }
-                else
-                {
-                    LogIo("RX WELCOME(0): 未读取到欢迎语，继续等待条码");
-                }
-
-                lock (_sync)
-                {
-                    _connected = true;
-                    _lastError = string.Empty;
-                }
-
-                while (!ct.IsCancellationRequested)
-                {
-                    try
-                    {
-                        var codeBytes = await ReadExactAsync(stream, BarcodeBytesLength, ct);
-                        var raw = Encoding.ASCII.GetString(codeBytes);
-                        var code = NormalizeBarcode(raw);
-                        if (string.IsNullOrWhiteSpace(code)) continue;
-                        if (IsScannerSystemMessage(code)) continue;
-
-                        var id = Interlocked.Increment(ref _lastId);
-                        _events.Enqueue(new BarcodeScanEvent(id, code, DateTime.Now.ToString("HH:mm:ss")));
-                    }
-                    catch (OperationCanceledException)
-                    {
-                        break;
-                    }
-                }
-            }
-            catch (OperationCanceledException)
-            {
-                if (ct.IsCancellationRequested)
-                {
-                    // stopping
-                }
-                else
-                {
-                    lock (_sync)
-                    {
-                        _lastError = "扫码枪连接超时";
-                    }
-                    LogIo("RX ERROR: 扫码枪连接超时");
-                    try
-                    {
-                        await Task.Delay(1000, ct);
-                    }
-                    catch
-                    {
-                    }
-                }
-            }
-            catch (Exception ex)
-            {
-                lock (_sync)
-                {
-                    _lastError = $"扫码枪连接异常: {ex.Message}";
-                }
-                LogIo($"RX ERROR: {ex.Message}");
-
-                try
-                {
-                    await Task.Delay(1000, ct);
-                }
-                catch { }
-            }
-            finally
-            {
-                lock (_sync)
-                {
-                    _connected = false;
-                }
-            }
+            _skippedCount.AddOrUpdate(key, 1, (_, current) => current + 1);
+            return false;
         }
-    }
-
-    private void TrimQueueIfNeeded()
-    {
-        if (_events.Count <= 2000) return;
-        while (_events.Count > 1500 && _events.TryDequeue(out _))
-        {
-        }
-    }
-
-    private static string NormalizeBarcode(string raw)
-    {
-        var cleaned = new string(raw.Where(c => !char.IsControl(c)).ToArray());
-        return cleaned.Trim();
-    }
-
-    private static bool IsScannerSystemMessage(string text)
-    {
-        if (string.IsNullOrWhiteSpace(text)) return true;
-        var t = text.Trim();
-        if (t.StartsWith("Welcome to Socket Channel", StringComparison.OrdinalIgnoreCase)) return true;
-        if (t.StartsWith("Connected", StringComparison.OrdinalIgnoreCase)) return true;
-        return false;
-    }
-
-    private static bool IsScannerBusyMessage(string text)
-    {
-        if (string.IsNullOrWhiteSpace(text)) return false;
-        var t = text.Trim();
-        if (t.Contains("already in use", StringComparison.OrdinalIgnoreCase)) return true;
-        if (t.Contains("no slot is available", StringComparison.OrdinalIgnoreCase)) return true;
-        if (t.Contains("unable to complete connect", StringComparison.OrdinalIgnoreCase)) return true;
-        return false;
-    }
-
-    private static async Task<byte[]> ReadExactAsync(Stream stream, int length, CancellationToken ct)
-    {
-        var buffer = new byte[length];
-        var offset = 0;
-        while (offset < length)
-        {
-            var read = await stream.ReadAsync(buffer.AsMemory(offset, length - offset), ct);
-            if (read == 0)
-            {
-                throw new IOException($"扫码枪连接已断开（期望{length}字节，实际{offset}字节）");
-            }
-            offset += read;
-        }
-        return buffer;
-    }
-
-    private static async Task<byte[]> ReadWelcomeHandshakeAsync(Stream stream, CancellationToken ct)
-    {
-        var buffer = new byte[WelcomeBytesLength];
-        var offset = 0;
-
-        using var firstWaitCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
-        firstWaitCts.CancelAfter(TimeSpan.FromSeconds(3));
-        try
-        {
-            var firstRead = await stream.ReadAsync(buffer.AsMemory(0, WelcomeBytesLength), firstWaitCts.Token);
-            if (firstRead <= 0) return Array.Empty<byte>();
-            offset += firstRead;
-        }
-        catch (OperationCanceledException)
-        {
-            return Array.Empty<byte>();
-        }
-
-        while (offset < WelcomeBytesLength)
-        {
-            if (stream is not NetworkStream ns || !ns.DataAvailable)
-            {
-                await Task.Delay(120, ct);
-                if (stream is not NetworkStream ns2 || !ns2.DataAvailable) break;
-            }
-
-            var read = await stream.ReadAsync(buffer.AsMemory(offset, WelcomeBytesLength - offset), ct);
-            if (read <= 0) break;
-            offset += read;
-        }
-
-        return buffer.AsSpan(0, offset).ToArray();
-    }
-
-    private void LogIo(string message)
-    {
-        var line = $"[{DateTime.Now:HH:mm:ss.fff}] [扫码枪通讯] {message}";
-        _ioLogs.Enqueue(line);
-        while (_ioLogs.Count > 300 && _ioLogs.TryDequeue(out _))
-        {
-        }
-        Console.WriteLine(line);
     }
 }
+
+public record LogSaveRequest(string FileName, string Content, string Path);
+public record PathPickerRequest(string Target);
+public record OrderStatusSelectionState(string SelectedCode, string OrderStatus, string UpdatedAt);
+public record PrintByBarTenderRequest(string BarTenderExePath, string TemplatePath, string? DatabasePath, List<PrintLabelItem>? Labels, string? PrinterName);
+public record PrintLabelItem(string Code, string Type, string TypeName);
+public record PrinterInfo(string Name, bool IsDefault, bool WorkOffline, string PrinterStatus);
+
 
