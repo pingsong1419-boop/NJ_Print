@@ -1,4 +1,4 @@
-﻿<script setup lang="ts">
+<script setup lang="ts">
 import { reactive, ref, watch } from 'vue'
 import type { AppConfig } from '../types/mes'
 
@@ -14,8 +14,8 @@ const emit = defineEmits<{
 }>()
 
 const form = reactive<AppConfig>({ ...props.modelValue })
-type PrintPathField = 'barTenderTemplatePath1' | 'barTenderTemplatePath2' | 'barTenderDatabasePath1' | 'barTenderDatabasePath2'
-const selectingField = ref<PrintPathField | ''>('')
+type PrintPathField = 'barTenderTemplatePath1' | 'barTenderTemplatePath2' | 'barTenderDatabasePath1' | 'barTenderDatabasePath2' | 'barTenderExePath'
+const selectingField = ref<PrintPathField | 'barTenderExePath' | ''>('')
 
 watch(
   () => props.visible,
@@ -39,12 +39,12 @@ function handleCancel() {
   emit('update:visible', false)
 }
 
-async function pickPath(field: PrintPathField, target: 'template' | 'database') {
+async function pickPath(field: PrintPathField, target: 'template' | 'database' | 'bartenderexe') {
   if (selectingField.value) return
 
   selectingField.value = field
   try {
-    const response = await fetch('http://127.0.0.1:5246/pathPicker/select', {
+    const response = await fetch('/pathPicker/select', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -160,7 +160,12 @@ async function pickPath(field: PrintPathField, target: 'template' | 'database') 
             <div class="section-title">打印机参数设置</div>
             <div class="field-group">
               <label>BarTender EXE 路径</label>
-              <input v-model="form.barTenderExePath" type="text" class="input-field" />
+              <div class="path-row">
+                <input v-model="form.barTenderExePath" type="text" class="input-field" />
+                <button class="path-btn" :disabled="!!selectingField" @click="pickPath('barTenderExePath', 'bartenderexe')">
+                  {{ selectingField === 'barTenderExePath' ? '选择中...' : '选择' }}
+                </button>
+              </div>
             </div>
             <div class="field-group">
               <label>模板路径 1 (.btw)</label>

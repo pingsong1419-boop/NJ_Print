@@ -1,4 +1,4 @@
-﻿import { defineConfig } from 'vite'
+import { defineConfig } from 'vite'
 import vue from '@vitejs/plugin-vue'
 
 export default defineConfig({
@@ -25,6 +25,39 @@ export default defineConfig({
         target: 'http://172.25.57.144:8072',
         changeOrigin: true,
         rewrite: (path) => path.replace(/^\/mes-push/, '')
+      },
+      // 本地后端接口代理
+      '/appConfig': {
+        target: 'http://localhost:5246',
+        changeOrigin: true
+      },
+      '/orderStatusSelection': {
+        target: 'http://localhost:5246',
+        changeOrigin: true
+      },
+      '/barcodeScanner': {
+        target: 'http://localhost:5246',
+        changeOrigin: true
+      },
+      '/printers': {
+        target: 'http://localhost:5246',
+        changeOrigin: true
+      },
+      '/saveLogs': {
+        target: 'http://localhost:5246',
+        changeOrigin: true
+      },
+      '/pathPicker': {
+        target: 'http://localhost:5246',
+        changeOrigin: true
+      },
+      '/printLabelsByBarTender': {
+        target: 'http://localhost:5246',
+        changeOrigin: true
+      },
+      '/api': {
+        target: 'http://localhost:5246',
+        changeOrigin: true
       }
     }
   },

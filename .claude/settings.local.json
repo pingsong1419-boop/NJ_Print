@@ -1,0 +1,25 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(dotnet run *)",
+      "Bash(dotnet build *)",
+      "Bash(npm run *)",
+      "mcp__zai-mcp-server__extract_text_from_screenshot",
+      "mcp__zai-mcp-server__analyze_image",
+      "Bash(dotnet publish *)",
+      "Bash(cp -r /c/Users/95403/Desktop/PACK_Onlie/dist/* /c/Users/95403/Desktop/PACK_Onlie/deploy/PACK_MaterialStation/frontend/)",
+      "Bash(cp /c/Users/95403/Desktop/PACK_Onlie/backend/MesScanner.Backend/bin/Release/net8.0/win-x64/publish/* /c/Users/95403/Desktop/PACK_Onlie/deploy/PACK_MaterialStation/backend/)",
+      "Bash(cp -r /c/Users/95403/Desktop/PACK_Onlie/dist/* /c/Users/95403/Desktop/PACK_Onlie/backend/MesScanner.Backend/wwwroot/)",
+      "Bash(cp -r /c/Users/95403/Desktop/PACK_Onlie/backend/MesScanner.Backend/bin/Release/net8.0/win-x64/publish/* /c/Users/95403/Desktop/PACK_Onlie/deploy/PACK_MaterialStation/backend/)",
+      "Bash(pkill -f \"MesScanner.Backend\")",
+      "Bash(nohup dotnet *)",
+      "Bash(curl -s -o /dev/null -w \"%{http_code}\" http://localhost:5246/)",
+      "Bash(curl -s -o /dev/null -w \"%{http_code}\" http://localhost:5246/index.html)",
+      "Bash(taskkill //F //IM MesScanner.Backend.exe)",
+      "Bash(curl -s http://localhost:5246/)",
+      "Bash(./MesScanner.Backend.exe)",
+      "Bash(curl -s http://localhost:5000/)",
+      "Bash(curl -s http://localhost:5000/appConfig)"
+    ]
+  }
+}

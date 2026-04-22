@@ -1,0 +1,37 @@
+PACK Material Station 部署说明
+==============================
+
+【目录结构】
+PACK_MaterialStation/
+├── frontend/          # 前端文件（直接用浏览器打开 index.html 或部署到 IIS/Nginx）
+├── backend/           # 后端服务
+│   ├── MesScanner.Backend.exe    # 主程序（双击运行）
+│   ├── Config/       # 配置文件目录
+│   └── appsettings.json
+├── Config/            # 应用配置
+│   └── app_config.json
+└── BarTender/         # 打印模板（可选）
+
+【启动步骤】
+1. 双击运行 backend/MesScanner.Backend.exe
+2. 等待看到 "Now listening on: http://localhost:5246"
+3. 打开浏览器访问 http://localhost:5246 （或前端部署地址）
+
+【前端部署】
+方式一：直接打开
+  - 双击打开 frontend/index.html（部分浏览器可能限制本地访问）
+
+方式二：IIS 部署
+  - 将 frontend 夹发布到 IIS 网站
+
+方式三：Nginx 部署
+  - 将 frontend 夹配置为静态文件服务
+
+【配置修改】
+- 编辑 Config/app_config.json 或通过界面"系统配置"修改参数
+- 配置项包括：MES API地址、扫码枪IP端口、BarTender路径等
+
+【注意事项】
+- 后端需要 .NET 8 Runtime（已打包为单文件exe，无需额外安装）
+- 防火墙需开放 5246 端口（前端访问后端）
+- 扫码枪需与服务端网络互通

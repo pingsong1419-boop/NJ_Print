@@ -6,7 +6,11 @@ using ScanModule;
 
 
 
-var builder = WebApplication.CreateBuilder(args);
+var builder = WebApplication.CreateBuilder(new WebApplicationOptions
+{
+    Args = args,
+    WebRootPath = "wwwroot"
+});
 var fileJsonOptions = new JsonSerializerOptions
 {
     PropertyNameCaseInsensitive = true,
@@ -26,11 +30,14 @@ builder.Services.AddCors(options =>
 });
 
 builder.Services.AddBarcodeScannerModule();
+builder.Services.AddHttpClient();
 
 var app = builder.Build();
 var interactionLogThrottler = new InteractionLogThrottler();
 
 app.UseCors("AllowAll");
+app.UseDefaultFiles(new DefaultFilesOptions { DefaultFileNames = new[] { "index.html" } });
+app.UseStaticFiles();
 app.Use(async (context, next) =>
 {
     var stopwatch = Stopwatch.StartNew();
@@ -64,7 +71,6 @@ app.Use(async (context, next) =>
     }
 });
 
-app.MapGet("/", () => "PACK Material Station Backend Running...");
 
 app.MapPost("/saveLogs", async (LogSaveRequest req) =>
 {
@@ -435,7 +441,108 @@ app.MapGet("/api/PrintedHistory/Check", (string code) =>
     return Results.Ok(new { exists });
 });
 
+// MES API 代理转发 (生产环境模拟 Vite Proxy)
+app.Map("/mes-api/{*remainder}", async (HttpContext context, string? remainder) =>
+{
+    // 对应 vite.config.ts: 172.25.57.144:8076, 且重写去掉 /mes-api
+    var targetUrl = $"http://172.25.57.144:8076/{remainder}{context.Request.QueryString}";
+    Console.WriteLine($"[MES代理] 转发请求: {context.Request.Method} /mes-api/{remainder} -> {targetUrl}");
+    await ProxyRequest(context, targetUrl);
+});
+
+app.Map("/mes-push/{*remainder}", async (HttpContext context, string? remainder) =>
+{
+    // 对应 vite.config.ts: 172.25.57.144:8072, 且重写去掉 /mes-push
+    var targetUrl = $"http://172.25.57.144:8072/{remainder}{context.Request.QueryString}";
+    Console.WriteLine($"[PUSH代理] 转发请求: {context.Request.Method} /mes-push/{remainder} -> {targetUrl}");
+    await ProxyRequest(context, targetUrl);
+});
+
 app.Run();
+
+async Task ProxyRequest(HttpContext context, string targetUrl)
+{
+    var httpClientFactory = context.RequestServices.GetRequiredService<IHttpClientFactory>();
+    var httpClient = httpClientFactory.CreateClient();
+    httpClient.Timeout = TimeSpan.FromSeconds(30); // 设置 30 秒超时
+    
+    var requestMessage = new HttpRequestMessage(new HttpMethod(context.Request.Method), targetUrl);
+    
+    // 转发请求头
+    foreach (var header in context.Request.Headers)
+    {
+        if (!header.Key.Equals("Host", StringComparison.OrdinalIgnoreCase) && 
+            !header.Key.Equals("Content-Type", StringComparison.OrdinalIgnoreCase) &&
+            !header.Key.Equals("Content-Length", StringComparison.OrdinalIgnoreCase))
+        {
+            requestMessage.Headers.TryAddWithoutValidation(header.Key, header.Value.ToArray());
+        }
+    }
+
+    // 转发并记录 Body
+    if (context.Request.ContentLength > 0 || context.Request.Headers.ContainsKey("Transfer-Encoding"))
+    {
+        context.Request.EnableBuffering();
+        context.Request.Body.Position = 0;
+        using var reader = new StreamReader(context.Request.Body, leaveOpen: true);
+        var bodyContent = await reader.ReadToEndAsync();
+        context.Request.Body.Position = 0;
+        
+        Console.WriteLine($"[代理请求正文]: {bodyContent}");
+
+        var streamContent = new StringContent(bodyContent, System.Text.Encoding.UTF8);
+        if (context.Request.Headers.TryGetValue("Content-Type", out var contentType))
+        {
+            streamContent.Headers.ContentType = System.Net.Http.Headers.MediaTypeHeaderValue.Parse(contentType.ToString());
+        }
+        requestMessage.Content = streamContent;
+    }
+
+    try
+    {
+        using var responseMessage = await httpClient.SendAsync(requestMessage, HttpCompletionOption.ResponseHeadersRead, context.RequestAborted);
+        
+        context.Response.StatusCode = (int)responseMessage.StatusCode;
+        
+        foreach (var header in responseMessage.Headers)
+        {
+            context.Response.Headers[header.Key] = header.Value.ToArray();
+        }
+
+        foreach (var header in responseMessage.Content.Headers)
+        {
+            if (!header.Key.Equals("Transfer-Encoding", StringComparison.OrdinalIgnoreCase))
+            {
+                context.Response.Headers[header.Key] = header.Value.ToArray();
+            }
+        }
+
+        // 读取响应内容以供日志记录
+        var responseBytes = await responseMessage.Content.ReadAsByteArrayAsync();
+        var responseString = System.Text.Encoding.UTF8.GetString(responseBytes);
+        var logBody = responseString.Length > 512 ? responseString.Substring(0, 512) + "..." : responseString;
+        Console.WriteLine($"[代理响应正文]: {logBody}");
+
+        // 重要：先清理所有可能冲突的内容头
+        context.Response.Headers.Remove("Content-Length");
+        context.Response.Headers.Remove("Transfer-Encoding");
+
+        // 重新计算并设置 Content-Length
+        context.Response.ContentLength = responseBytes.Length;
+
+        // 写入响应体
+        await context.Response.Body.WriteAsync(responseBytes, 0, responseBytes.Length);
+        await context.Response.Body.FlushAsync();
+        
+        Console.WriteLine($"[代理成功] 状态码: {context.Response.StatusCode} | {targetUrl}");
+    }
+    catch (Exception ex)
+    {
+        Console.WriteLine($"[代理失败] 转发异常: {targetUrl} | 错误: {ex.GetType().Name}: {ex.Message}");
+        context.Response.StatusCode = 502;
+        await context.Response.WriteAsJsonAsync(new { error = "Proxy Error", message = ex.Message });
+    }
+}
 
 static string GetOrderStatusStateFilePath()
 {
@@ -618,6 +725,8 @@ static string ExecutePowerShellPathDialog(string script)
         UseShellExecute = false,
         RedirectStandardOutput = true,
         RedirectStandardError = true,
+        StandardOutputEncoding = Encoding.UTF8,
+        StandardErrorEncoding = Encoding.UTF8,
         CreateNoWindow = true
     };
 
@@ -634,7 +743,9 @@ static string ExecutePowerShellPathDialog(string script)
     if (process.ExitCode != 0)
     {
         var errMsg = string.IsNullOrWhiteSpace(stderr) ? $"PowerShell ExitCode={process.ExitCode}" : stderr.Trim();
-        throw new InvalidOperationException(errMsg);
+        // 如果是用户取消，通常 ExitCode 为 0 或返回空行，这里记录日志但不抛出异常
+        Console.WriteLine($"[路径选择调试] PowerShell 错误: {errMsg}");
+        return string.Empty;
     }
 
     var lines = stdout
@@ -652,14 +763,20 @@ static string BuildOpenFileDialogScript(string title, string filter)
         "$ErrorActionPreference = 'Stop'\n" +
         "Add-Type -AssemblyName System.Windows.Forms\n" +
         "[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)\n" +
+        "$form = New-Object System.Windows.Forms.Form\n" +
+        "$form.TopMost = $true\n" +
+        "$form.Opacity = 0\n" +
+        "$form.ShowInTaskbar = $false\n" +
+        "$form.Show()\n" +
+        "$form.Activate()\n" +
         "$dlg = New-Object System.Windows.Forms.OpenFileDialog\n" +
         $"$dlg.Title = '{EscapePowerShellSingleQuoted(title)}'\n" +
         $"$dlg.Filter = '{EscapePowerShellSingleQuoted(filter)}'\n" +
         "$dlg.Multiselect = $false\n" +
         "$dlg.CheckFileExists = $true\n" +
         "$dlg.CheckPathExists = $true\n" +
-        "$w = New-Object -ComObject WScript.Shell; $w.AppActivate((Get-Process -Id $pid).Id) | Out-Null\n" +
-        "if ($dlg.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) { Write-Output $dlg.FileName }";
+        "if ($dlg.ShowDialog($form) -eq [System.Windows.Forms.DialogResult]::OK) { Write-Output $dlg.FileName }\n" +
+        "$form.Close()";
 }
 
 static string BuildSaveFileDialogScript(string title, string filter, string fileName)
@@ -668,6 +785,12 @@ static string BuildSaveFileDialogScript(string title, string filter, string file
         "$ErrorActionPreference = 'Stop'\n" +
         "Add-Type -AssemblyName System.Windows.Forms\n" +
         "[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)\n" +
+        "$form = New-Object System.Windows.Forms.Form\n" +
+        "$form.TopMost = $true\n" +
+        "$form.Opacity = 0\n" +
+        "$form.ShowInTaskbar = $false\n" +
+        "$form.Show()\n" +
+        "$form.Activate()\n" +
         "$dlg = New-Object System.Windows.Forms.SaveFileDialog\n" +
         $"$dlg.Title = '{EscapePowerShellSingleQuoted(title)}'\n" +
         $"$dlg.Filter = '{EscapePowerShellSingleQuoted(filter)}'\n" +
@@ -675,8 +798,8 @@ static string BuildSaveFileDialogScript(string title, string filter, string file
         "$dlg.OverwritePrompt = $false\n" +
         "$dlg.CheckPathExists = $true\n" +
         "$dlg.AddExtension = $true\n" +
-        "$w = New-Object -ComObject WScript.Shell; $w.AppActivate((Get-Process -Id $pid).Id) | Out-Null\n" +
-        "if ($dlg.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) { Write-Output $dlg.FileName }";
+        "if ($dlg.ShowDialog($form) -eq [System.Windows.Forms.DialogResult]::OK) { Write-Output $dlg.FileName }\n" +
+        "$form.Close()";
 }
 
 static string BuildFolderDialogScript(string title)
@@ -685,11 +808,17 @@ static string BuildFolderDialogScript(string title)
         "$ErrorActionPreference = 'Stop'\n" +
         "Add-Type -AssemblyName System.Windows.Forms\n" +
         "[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)\n" +
+        "$form = New-Object System.Windows.Forms.Form\n" +
+        "$form.TopMost = $true\n" +
+        "$form.Opacity = 0\n" +
+        "$form.ShowInTaskbar = $false\n" +
+        "$form.Show()\n" +
+        "$form.Activate()\n" +
         "$dlg = New-Object System.Windows.Forms.FolderBrowserDialog\n" +
         $"$dlg.Description = '{EscapePowerShellSingleQuoted(title)}'\n" +
         "$dlg.UseDescriptionForTitle = $true\n" +
-        "$w = New-Object -ComObject WScript.Shell; $w.AppActivate((Get-Process -Id $pid).Id) | Out-Null\n" +
-        "if ($dlg.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) { Write-Output $dlg.SelectedPath }";
+        "if ($dlg.ShowDialog($form) -eq [System.Windows.Forms.DialogResult]::OK) { Write-Output $dlg.SelectedPath }\n" +
+        "$form.Close()";
 }
 
 static string EscapePowerShellSingleQuoted(string value)

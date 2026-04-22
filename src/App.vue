@@ -379,7 +379,7 @@ const testResult = ref<TestResult>('IDLE')
 const resultMessage = ref('')
 const logs = ref<{ time: string; level: 'info' | 'success' | 'warn' | 'error'; msg: string }[]>([])
 const apiRecords = ref<ApiRecord[]>([])
-const activeTab = ref<'route' | 'material' | 'code' | 'print' | 'api' | 'log'>('route')
+const activeTab = ref<'route' | 'material' | 'code' | 'print' | 'api' | 'log' | 'history'>('route')
 
 const materialVerificationLoading = ref(false)
 const materialVerificationSuccess = ref(false)
@@ -1756,30 +1756,33 @@ async function executeReset() {
   flex-direction: column;
   height: 100vh;
   width: 100vw;
-  background: #0a0e1a;
-  color: #c8d6e5;
-  font-family: 'Segoe UI', 'Microsoft YaHei', sans-serif;
+  background: #060912;
+  color: #d1d9e6;
+  font-family: 'Inter', 'Segoe UI', 'Microsoft YaHei', sans-serif;
   overflow: hidden;
 }
 
 .app-header {
   display: flex;
   align-items: center;
-  padding: 0 20px;
-  height: 52px;
-  background: linear-gradient(135deg, #0d1b2a 0%, #112240 100%);
-  border-bottom: 1px solid rgba(100, 181, 246, 0.2);
-  gap: 16px;
+  padding: 0 24px;
+  height: 64px;
+  background: rgba(13, 27, 42, 0.85);
+  backdrop-filter: blur(12px);
+  border-bottom: 1px solid rgba(100, 181, 246, 0.25);
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.3);
+  z-index: 100;
+  gap: 20px;
 }
 
 .global-status-bar {
-  height: 38px;
+  height: 42px;
   display: flex;
   align-items: center;
-  gap: 10px;
-  padding: 0 16px;
-  border-bottom: 1px solid rgba(100, 181, 246, 0.14);
-  font-size: 13px;
+  gap: 12px;
+  padding: 0 24px;
+  border-bottom: 1px solid rgba(100, 181, 246, 0.15);
+  font-size: 14px;
 }
 
 .global-status-bar .gs-label {
@@ -1908,10 +1911,11 @@ async function executeReset() {
 .left-panel {
   display: flex;
   flex-direction: column;
-  gap: 10px;
-  width: 360px;
+  gap: 12px;
+  width: 420px;
   flex-shrink: 0;
   overflow-y: auto;
+  padding-right: 4px;
 }
 
 .right-panel {
@@ -1919,23 +1923,30 @@ async function executeReset() {
   display: flex;
   flex-direction: column;
   overflow: hidden;
-  background: #131929;
-  border: 1px solid rgba(100, 181, 246, 0.12);
-  border-radius: 10px;
+  background: #0f172a;
+  border: 1px solid rgba(100, 181, 246, 0.18);
+  border-radius: 12px;
+  box-shadow: inset 0 0 40px rgba(0, 0, 0, 0.2);
 }
 
 .card {
-  background: #131929;
-  border: 1px solid rgba(100, 181, 246, 0.15);
-  border-radius: 10px;
-  padding: 12px;
+  background: #0f172a;
+  border: 1px solid rgba(100, 181, 246, 0.2);
+  border-radius: 12px;
+  padding: 16px;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.2);
+  transition: border-color 0.3s ease;
+}
+
+.card:hover {
+  border-color: rgba(100, 181, 246, 0.4);
 }
 
 .card-title {
-  font-size: 13px;
+  font-size: 15px;
   font-weight: 700;
-  color: #90caf9;
-  margin-bottom: 10px;
+  color: #64b5f6;
+  margin-bottom: 14px;
 }
 
 .scan-input-wrap {

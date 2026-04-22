@@ -67,24 +67,26 @@ export async function createModulePackCode(config: AppConfig, data: ModulePackCo
   return postRequest<ModulePackCodeCreateResponse>(config.codeCreateApiUrl, data)
 }
 
+const API_BASE = ''
+
 export async function printLabelsByBarTender(data: BarTenderPrintRequest): Promise<BarTenderPrintResponse> {
-  return postRequest<BarTenderPrintResponse>('http://127.0.0.1:5246/printLabelsByBarTender', data)
+  return postRequest<BarTenderPrintResponse>(`${API_BASE}/printLabelsByBarTender`, data)
 }
 
 export async function selectPathByDialog(target: PathPickerTarget): Promise<PathPickerResponse> {
-  return postRequest<PathPickerResponse>('http://127.0.0.1:5246/pathPicker/select', { target })
+  return postRequest<PathPickerResponse>(`${API_BASE}/pathPicker/select`, { target })
 }
 
 export async function startBarcodeScanner(data: BarcodeScannerStartRequest): Promise<BarcodeScannerStatus> {
-  return postRequest<BarcodeScannerStatus>('http://127.0.0.1:5246/barcodeScanner/start', data)
+  return postRequest<BarcodeScannerStatus>(`${API_BASE}/barcodeScanner/start`, data)
 }
 
 export async function stopBarcodeScanner(): Promise<BarcodeScannerStatus> {
-  return postRequest<BarcodeScannerStatus>('http://127.0.0.1:5246/barcodeScanner/stop', {})
+  return postRequest<BarcodeScannerStatus>(`${API_BASE}/barcodeScanner/stop`, {})
 }
 
 export async function pullBarcodeScanner(afterId: number): Promise<BarcodeScannerPullResponse> {
-  const response = await fetch(`http://127.0.0.1:5246/barcodeScanner/pull?afterId=${afterId}`)
+  const response = await fetch(`${API_BASE}/barcodeScanner/pull?afterId=${afterId}`)
   if (!response.ok) {
     throw new Error(`获取扫码数据失败: HTTP ${response.status}`)
   }
@@ -92,7 +94,7 @@ export async function pullBarcodeScanner(afterId: number): Promise<BarcodeScanne
 }
 
 export async function readOrderStatusSelectionFromFile(): Promise<OrderStatusSelectionState | null> {
-  const response = await fetch('http://127.0.0.1:5246/orderStatusSelection')
+  const response = await fetch(`${API_BASE}/orderStatusSelection`)
   if (response.status === 404) return null
 
   if (!response.ok) {
@@ -111,7 +113,7 @@ export async function readOrderStatusSelectionFromFile(): Promise<OrderStatusSel
 }
 
 export async function saveOrderStatusSelectionToFile(state: OrderStatusSelectionState): Promise<void> {
-  const response = await fetch('http://127.0.0.1:5246/orderStatusSelection', {
+  const response = await fetch(`${API_BASE}/orderStatusSelection`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -126,7 +128,7 @@ export async function saveOrderStatusSelectionToFile(state: OrderStatusSelection
 }
 
 export async function readAppConfigFromFile(): Promise<Partial<AppConfig> | null> {
-  const response = await fetch('http://127.0.0.1:5246/appConfig')
+  const response = await fetch(`${API_BASE}/appConfig`)
   if (response.status === 404) return null
   if (!response.ok) {
     throw new Error(`读取配置文件失败: HTTP ${response.status}`)
@@ -138,7 +140,7 @@ export async function readAppConfigFromFile(): Promise<Partial<AppConfig> | null
 }
 
 export async function saveAppConfigToFile(config: AppConfig): Promise<void> {
-  const response = await fetch('http://127.0.0.1:5246/appConfig', {
+  const response = await fetch(`${API_BASE}/appConfig`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -152,7 +154,7 @@ export async function saveAppConfigToFile(config: AppConfig): Promise<void> {
 }
 
 export async function checkPrintedHistory(code: string): Promise<{ exists: boolean }> {
-  const response = await fetch(`http://127.0.0.1:5246/api/PrintedHistory/Check?code=${encodeURIComponent(code)}`)
+  const response = await fetch(`${API_BASE}/api/PrintedHistory/Check?code=${encodeURIComponent(code)}`)
   if (!response.ok) {
     throw new Error(`查询打印历史失败: HTTP ${response.status}`)
   }
@@ -160,7 +162,7 @@ export async function checkPrintedHistory(code: string): Promise<{ exists: boole
 }
 
 export async function getPrintedHistoryList(): Promise<any[]> {
-  const response = await fetch('http://127.0.0.1:5246/api/PrintedHistory/List')
+  const response = await fetch(`${API_BASE}/api/PrintedHistory/List`)
   if (!response.ok) {
     throw new Error(`获取打印历史失败: HTTP ${response.status}`)
   }
