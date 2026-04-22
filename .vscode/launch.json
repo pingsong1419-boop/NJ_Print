@@ -3,10 +3,14 @@
   "configurations": [
     {
       "name": ".NET Backend",
-      "type": "dotnet",
+      "type": "coreclr",
       "request": "launch",
-      "projectPath": "${workspaceFolder}/backend/MesScanner.Backend/MesScanner.Backend.csproj",
+      "preLaunchTask": "build backend",
+      "program": "${workspaceFolder}/backend/MesScanner.Backend/bin/Debug/net8.0/MesScanner.Backend.dll",
+      "args": [],
       "cwd": "${workspaceFolder}/backend/MesScanner.Backend",
+      "stopAtEntry": false,
+      "console": "internalConsole",
       "env": {
         "ASPNETCORE_ENVIRONMENT": "Development"
       }
