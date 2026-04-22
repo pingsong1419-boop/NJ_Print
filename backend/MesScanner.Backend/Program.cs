@@ -441,51 +441,28 @@ app.MapGet("/api/PrintedHistory/Check", (string code) =>
     return Results.Ok(new { exists });
 });
 
-// MES API 代理转发 (生产环境模拟 Vite Proxy)
-app.Map("/mes-api/{*remainder}", async (HttpContext context, string? remainder) =>
+// 通用 API 代理转发，用于支持配置文件中定义的绝对路径并解决跨域问题
+app.Map("/api/proxy", async (HttpContext context) =>
 {
-    var config = await GetAppConfigAsync();
-    var baseUrl = config.TryGetProperty("mesApiBaseUrl", out var p) ? p.GetString() : "http://172.25.57.144:8076";
-    if (string.IsNullOrWhiteSpace(baseUrl)) baseUrl = "http://172.25.57.144:8076";
-    baseUrl = baseUrl.TrimEnd('/');
+    var targetUrl = context.Request.Query["url"].ToString();
+    if (string.IsNullOrWhiteSpace(targetUrl))
+    {
+        context.Response.StatusCode = 400;
+        await context.Response.WriteAsJsonAsync(new { error = "Target URL is required" });
+        return;
+    }
 
-    var targetUrl = $"{baseUrl}/{remainder}{context.Request.QueryString}";
-    Console.WriteLine($"[MES代理] 转发请求: {context.Request.Method} /mes-api/{remainder} -> {targetUrl}");
-    await ProxyRequest(context, targetUrl);
-});
-
-app.Map("/mes-push/{*remainder}", async (HttpContext context, string? remainder) =>
-{
-    var config = await GetAppConfigAsync();
-    var baseUrl = config.TryGetProperty("mesPushBaseUrl", out var p) ? p.GetString() : "http://172.25.57.144:8072";
-    if (string.IsNullOrWhiteSpace(baseUrl)) baseUrl = "http://172.25.57.144:8072";
-    baseUrl = baseUrl.TrimEnd('/');
-
-    var targetUrl = $"{baseUrl}/{remainder}{context.Request.QueryString}";
-    Console.WriteLine($"[PUSH代理] 转发请求: {context.Request.Method} /mes-push/{remainder} -> {targetUrl}");
+    Console.WriteLine($"[通用代理] 转发请求: {context.Request.Method} -> {targetUrl}");
     await ProxyRequest(context, targetUrl);
 });
 
 app.Run();
 
-async Task<JsonElement> GetAppConfigAsync()
-{
-    try
-    {
-        var configFile = GetAppConfigFilePath();
-        if (!File.Exists(configFile)) return JsonDocument.Parse("{}").RootElement;
-        var content = await File.ReadAllTextAsync(configFile);
-        if (string.IsNullOrWhiteSpace(content)) return JsonDocument.Parse("{}").RootElement;
-        return JsonDocument.Parse(content).RootElement.Clone();
-    }
-    catch { return JsonDocument.Parse("{}").RootElement; }
-}
-
 async Task ProxyRequest(HttpContext context, string targetUrl)
 {
     var httpClientFactory = context.RequestServices.GetRequiredService<IHttpClientFactory>();
     var httpClient = httpClientFactory.CreateClient();
-    httpClient.Timeout = TimeSpan.FromSeconds(30); // 设置 30 秒超时
+    httpClient.Timeout = TimeSpan.FromSeconds(30);
     
     var requestMessage = new HttpRequestMessage(new HttpMethod(context.Request.Method), targetUrl);
     
@@ -500,7 +477,7 @@ async Task ProxyRequest(HttpContext context, string targetUrl)
         }
     }
 
-    // 转发并记录 Body
+    // 转发 Body
     if (context.Request.ContentLength > 0 || context.Request.Headers.ContainsKey("Transfer-Encoding"))
     {
         context.Request.EnableBuffering();
@@ -509,8 +486,6 @@ async Task ProxyRequest(HttpContext context, string targetUrl)
         var bodyContent = await reader.ReadToEndAsync();
         context.Request.Body.Position = 0;
         
-        Console.WriteLine($"[代理请求正文]: {bodyContent}");
-
         var streamContent = new StringContent(bodyContent, System.Text.Encoding.UTF8);
         if (context.Request.Headers.TryGetValue("Content-Type", out var contentType))
         {
@@ -522,7 +497,6 @@ async Task ProxyRequest(HttpContext context, string targetUrl)
     try
     {
         using var responseMessage = await httpClient.SendAsync(requestMessage, HttpCompletionOption.ResponseHeadersRead, context.RequestAborted);
-        
         context.Response.StatusCode = (int)responseMessage.StatusCode;
         
         foreach (var header in responseMessage.Headers)
@@ -538,28 +512,17 @@ async Task ProxyRequest(HttpContext context, string targetUrl)
             }
         }
 
-        // 读取响应内容以供日志记录
         var responseBytes = await responseMessage.Content.ReadAsByteArrayAsync();
-        var responseString = System.Text.Encoding.UTF8.GetString(responseBytes);
-        var logBody = responseString.Length > 512 ? responseString.Substring(0, 512) + "..." : responseString;
-        Console.WriteLine($"[代理响应正文]: {logBody}");
-
-        // 重要：先清理所有可能冲突的内容头
         context.Response.Headers.Remove("Content-Length");
         context.Response.Headers.Remove("Transfer-Encoding");
-
-        // 重新计算并设置 Content-Length
         context.Response.ContentLength = responseBytes.Length;
 
-        // 写入响应体
         await context.Response.Body.WriteAsync(responseBytes, 0, responseBytes.Length);
         await context.Response.Body.FlushAsync();
-        
-        Console.WriteLine($"[代理成功] 状态码: {context.Response.StatusCode} | {targetUrl}");
     }
     catch (Exception ex)
     {
-        Console.WriteLine($"[代理失败] 转发异常: {targetUrl} | 错误: {ex.GetType().Name}: {ex.Message}");
+        Console.WriteLine($"[代理失败] {targetUrl} | {ex.Message}");
         context.Response.StatusCode = 502;
         await context.Response.WriteAsJsonAsync(new { error = "Proxy Error", message = ex.Message });
     }
@@ -577,7 +540,6 @@ static string GetAppConfigFilePath()
 
 static string GetConfigDirectoryPath()
 {
-    // 强制使用程序的基目录下的 Config 文件夹，以便打包后路径一致
     var baseDir = AppDomain.CurrentDomain.BaseDirectory;
     var configPath = Path.Combine(baseDir, "Config");
     if (!Directory.Exists(configPath))

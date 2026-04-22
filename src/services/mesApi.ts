@@ -19,7 +19,10 @@ import type {
 } from '../types/mes'
 
 async function postRequest<T>(url: string, body: object): Promise<T> {
-  const response = await fetch(url, {
+  // 无论配置中是绝对路径还是相对路径，都通过后端的通用代理转发，以解决跨域并实现完全配置化
+  const proxyUrl = `/api/proxy?url=${encodeURIComponent(url)}`
+  
+  const response = await fetch(proxyUrl, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
