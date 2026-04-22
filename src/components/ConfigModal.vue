@@ -84,6 +84,16 @@ async function pickPath(field: PrintPathField, target: 'template' | 'database' |
         <div class="modal-body">
           <section class="config-section">
             <div class="section-title">MES 参数设置</div>
+            <div class="field-groups-row">
+              <div class="field-group">
+                <label>MES API 基地址 (目标服务器)</label>
+                <input v-model="form.mesApiBaseUrl" type="text" class="input-field" placeholder="http://172.25.57.144:8076" />
+              </div>
+              <div class="field-group">
+                <label>MES Push 基地址 (推送服务)</label>
+                <input v-model="form.mesPushBaseUrl" type="text" class="input-field" placeholder="http://172.25.57.144:8072" />
+              </div>
+            </div>
             <div class="field-group">
               <label>首工序获取工单 API</label>
               <input v-model="form.orderApiUrl" type="text" class="input-field" />

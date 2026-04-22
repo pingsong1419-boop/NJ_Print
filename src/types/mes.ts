@@ -5,6 +5,8 @@ export interface AppConfig {
   fullMaterialApiUrl: string
   codeCreateApiUrl: string
   mesPushApiUrl: string
+  mesApiBaseUrl?: string
+  mesPushBaseUrl?: string
   barTenderExePath: string
   barTenderTemplatePath1: string
   barTenderTemplatePath2: string

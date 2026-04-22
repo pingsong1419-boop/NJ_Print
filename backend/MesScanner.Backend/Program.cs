@@ -444,21 +444,42 @@ app.MapGet("/api/PrintedHistory/Check", (string code) =>
 // MES API 代理转发 (生产环境模拟 Vite Proxy)
 app.Map("/mes-api/{*remainder}", async (HttpContext context, string? remainder) =>
 {
-    // 对应 vite.config.ts: 172.25.57.144:8076, 且重写去掉 /mes-api
-    var targetUrl = $"http://172.25.57.144:8076/{remainder}{context.Request.QueryString}";
+    var config = await GetAppConfigAsync();
+    var baseUrl = config.TryGetProperty("mesApiBaseUrl", out var p) ? p.GetString() : "http://172.25.57.144:8076";
+    if (string.IsNullOrWhiteSpace(baseUrl)) baseUrl = "http://172.25.57.144:8076";
+    baseUrl = baseUrl.TrimEnd('/');
+
+    var targetUrl = $"{baseUrl}/{remainder}{context.Request.QueryString}";
     Console.WriteLine($"[MES代理] 转发请求: {context.Request.Method} /mes-api/{remainder} -> {targetUrl}");
     await ProxyRequest(context, targetUrl);
 });
 
 app.Map("/mes-push/{*remainder}", async (HttpContext context, string? remainder) =>
 {
-    // 对应 vite.config.ts: 172.25.57.144:8072, 且重写去掉 /mes-push
-    var targetUrl = $"http://172.25.57.144:8072/{remainder}{context.Request.QueryString}";
+    var config = await GetAppConfigAsync();
+    var baseUrl = config.TryGetProperty("mesPushBaseUrl", out var p) ? p.GetString() : "http://172.25.57.144:8072";
+    if (string.IsNullOrWhiteSpace(baseUrl)) baseUrl = "http://172.25.57.144:8072";
+    baseUrl = baseUrl.TrimEnd('/');
+
+    var targetUrl = $"{baseUrl}/{remainder}{context.Request.QueryString}";
     Console.WriteLine($"[PUSH代理] 转发请求: {context.Request.Method} /mes-push/{remainder} -> {targetUrl}");
     await ProxyRequest(context, targetUrl);
 });
 
 app.Run();
+
+async Task<JsonElement> GetAppConfigAsync()
+{
+    try
+    {
+        var configFile = GetAppConfigFilePath();
+        if (!File.Exists(configFile)) return JsonDocument.Parse("{}").RootElement;
+        var content = await File.ReadAllTextAsync(configFile);
+        if (string.IsNullOrWhiteSpace(content)) return JsonDocument.Parse("{}").RootElement;
+        return JsonDocument.Parse(content).RootElement.Clone();
+    }
+    catch { return JsonDocument.Parse("{}").RootElement; }
+}
 
 async Task ProxyRequest(HttpContext context, string targetUrl)
 {
@@ -556,9 +577,13 @@ static string GetAppConfigFilePath()
 
 static string GetConfigDirectoryPath()
 {
-    var projectRoot = ResolveProjectRootPath();
-    var configPath = Path.Combine(projectRoot, "Config");
-    Directory.CreateDirectory(configPath);
+    // 强制使用程序的基目录下的 Config 文件夹，以便打包后路径一致
+    var baseDir = AppDomain.CurrentDomain.BaseDirectory;
+    var configPath = Path.Combine(baseDir, "Config");
+    if (!Directory.Exists(configPath))
+    {
+        Directory.CreateDirectory(configPath);
+    }
     return configPath;
 }
 
@@ -605,26 +630,6 @@ static string SelectPathByTarget(string target)
             "选择路径",
             "所有文件 (*.*)|*.*"))
     };
-}
-
-static string ResolveProjectRootPath()
-{
-    var probePaths = new[] { Directory.GetCurrentDirectory(), AppContext.BaseDirectory };
-    foreach (var path in probePaths)
-    {
-        var dir = new DirectoryInfo(path);
-        for (var i = 0; i < 8 && dir is not null; i++)
-        {
-            if (File.Exists(Path.Combine(dir.FullName, "package.json")) &&
-                Directory.Exists(Path.Combine(dir.FullName, "backend")))
-            {
-                return dir.FullName;
-            }
-            dir = dir.Parent;
-        }
-    }
-
-    return Directory.GetCurrentDirectory();
 }
 
 static List<PrinterInfo> GetInstalledPrinters()
